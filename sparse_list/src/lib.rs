@@ -26,10 +26,12 @@ impl<T> SparseList<T> {
     pub fn remove(&mut self, index: usize) -> Option<T> {
         if index < self.data.len() {
             let ret = self.data[index].take();
-            self.free_indices.push_back(index);
+            if ret.is_some() {
+                self.free_indices.push_back(index);
+            }
             ret
         } else {
-            panic!("Index out of bounds");
+            None
         }
     }
 

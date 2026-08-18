@@ -17,9 +17,9 @@ if(POLICY CMP0167)
 endif()
 
 # Dynarmic project options
+option(DYNARMIC_DEBUG "Debug mode" OFF)
 option(DYNARMIC_ENABLE_CPU_FEATURE_DETECTION "Turning this off causes dynarmic to assume the host CPU doesn't support anything later than SSE3" ON)
 option(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT "Enables support for systems that require W^X" OFF)
-option(DYNARMIC_DEBUG "Debug mode" OFF)
 option(DYNARMIC_FATAL_ERRORS "Errors are fatal" OFF)
 option(DYNARMIC_IGNORE_ASSERTS "Ignore asserts" OFF)
 option(DYNARMIC_TESTS "Build tests" ${BUILD_TESTING})
@@ -27,6 +27,7 @@ option(DYNARMIC_TESTS_USE_UNICORN "Enable fuzzing tests against unicorn" OFF)
 option(DYNARMIC_USE_LLVM "Support disassembly of jitted x86_64 code using LLVM" OFF)
 option(DYNARMIC_USE_PRECOMPILED_HEADERS "Use precompiled headers" ON)
 option(DYNARMIC_USE_BUNDLED_EXTERNALS "Use all bundled externals (useful when e.g. cross-compiling)" OFF)
+option(DYNARMIC_WARNINGS_AS_ERRORS "Warnings as errors" OFF)
 if (NOT DEFINED DYNARMIC_FRONTENDS)
     set(DYNARMIC_FRONTENDS "A64" CACHE STRING "Selects which frontends to enable")
 endif()
@@ -81,6 +82,11 @@ if (MSVC)
         /bigobj             # Increase number of sections in .obj files
         /DNOMINMAX)
 
+    if (DYNARMIC_WARNINGS_AS_ERRORS)
+        list(APPEND DYNARMIC_CXX_FLAGS
+             /WX)
+    endif()
+
     if (${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang")
         list(APPEND DYNARMIC_CXX_FLAGS
              -Qunused-arguments
@@ -92,18 +98,17 @@ else()
         -Wextra
         -Wcast-qual
         -pedantic
-        -Wno-missing-braces
-    )
-    list(APPEND DYNARMIC_CXX_FLAGS -O3)
-    list(APPEND DYNARMIC_C_FLAGS -O3)
+        -Wno-missing-braces)
+
+    if (DYNARMIC_WARNINGS_AS_ERRORS)
+        list(APPEND DYNARMIC_CXX_FLAGS
+             -pedantic-errors
+             -Werror)
+    endif()
 
     if (DYNARMIC_FATAL_ERRORS)
         list(APPEND DYNARMIC_CXX_FLAGS
              -Wfatal-errors)
-    endif()
-
-    if (ARCHITECTURE_x86_64)
-        add_compile_options("-mcx16")
     endif()
 
     if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
@@ -113,6 +118,9 @@ else()
         # GCC knows that the variable is actually a Reg64.  isMEM() will never return true for a
         # Reg64, but GCC doesn't know that.
         list(APPEND DYNARMIC_CXX_FLAGS -Wno-array-bounds)
+
+        # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=117063
+        list(APPEND DYNARMIC_CXX_FLAGS -Wno-stringop-overread)
     endif()
 
     if (CMAKE_CXX_COMPILER_ID MATCHES "[Cc]lang")
@@ -142,22 +150,42 @@ if (DYNARMIC_USE_BUNDLED_EXTERNALS)
     set(CMAKE_DISABLE_FIND_PACKAGE_Zydis ON)
 endif()
 
+# Ensure that robin-map `export`s
+set(TSL_ROBIN_MAP_ENABLE_INSTALL ON)
+
+# TODO: Only find if parent dependency didn't provide Boost. Azahar uses non-standard
+# boost library names.
 find_package(Boost 1.57 REQUIRED)
-find_package(fmt 9 CONFIG)
-find_package(mcl 0.1.12 EXACT CONFIG)
-find_package(tsl-robin-map CONFIG)
+
+if (NOT TARGET fmt::fmt)
+    find_package(fmt 9 CONFIG)
+endif()
+if (NOT TARGET merry::mcl)
+    find_package(mcl 0.1.14 EXACT CONFIG)
+endif()
+if (NOT TARGET tsl::robin_map)
+    find_package(tsl-robin-map CONFIG)
+endif()
 
 if ("arm64" IN_LIST ARCHITECTURE OR DYNARMIC_TESTS)
-    find_package(oaknut 2.0.1 CONFIG)
+    if (NOT TARGET merry::oaknut)
+        find_package(oaknut 2.0.1 CONFIG)
+    endif()
 endif()
 
 if ("riscv" IN_LIST ARCHITECTURE)
-    find_package(biscuit 0.9.1 QUIET)
+    if (NOT TARGET biscuit::biscuit)
+        find_package(biscuit 0.9.1 QUIET)
+    endif()
 endif()
 
 if ("x86_64" IN_LIST ARCHITECTURE)
-    find_package(xbyak 7 CONFIG)
-    find_package(Zydis 4 CONFIG)
+    if (NOT TARGET xbyak::xbyak)
+        find_package(xbyak 7 CONFIG)
+    endif()
+    if (NOT TARGET Zydis::Zydis)
+        find_package(Zydis 4 CONFIG)
+    endif()
 endif()
 
 if (DYNARMIC_USE_LLVM)
@@ -166,7 +194,9 @@ if (DYNARMIC_USE_LLVM)
 endif()
 
 if (DYNARMIC_TESTS)
-    find_package(Catch2 3 CONFIG)
+    if (NOT TARGET Catch2::Catch2WithMain)
+        find_package(Catch2 3 CONFIG)
+    endif()
     if (DYNARMIC_TESTS_USE_UNICORN)
         find_package(Unicorn REQUIRED)
     endif()
@@ -177,6 +207,9 @@ add_subdirectory(externals)
 
 # Dynarmic project files
 add_subdirectory(src/dynarmic)
+if (DYNARMIC_TESTS)
+    add_subdirectory(tests)
+endif()
 
 #
 # Install
@@ -204,8 +237,4 @@ install(FILES
 )
 
 install(DIRECTORY src/dynarmic TYPE INCLUDE FILES_MATCHING PATTERN "*.h")
-
-# Rename the "static" lib to avoid filename clash.
-set_target_properties(dynarmic PROPERTIES OUTPUT_NAME "dynarmic-static")
-# Black Magic!!!!!!!
-bundle_static_library(dynarmic dynarmic_archive dynarmic)
+install(DIRECTORY src/dynarmic TYPE INCLUDE FILES_MATCHING PATTERN "*.inc")

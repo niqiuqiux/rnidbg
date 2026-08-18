@@ -24,6 +24,7 @@ use crate::android::virtual_library::libc::Libc;
 use crate::backend::{Backend, Permission, RegisterARM64};
 use crate::emulator::consts::{LR};
 use crate::memory::AndroidElfLoader;
+use crate::memory::library_file::{ElfLibraryFile, LibraryFile};
 use crate::memory::svc_memory::SvcMemory;
 use crate::backend::Context;
 use std::cell::{RefCell, UnsafeCell};
@@ -72,6 +73,11 @@ pub(crate) struct AndroidEmulatorInner<'a, T: Clone> {
 
     // CONTEXT LABEL
     pub context_task: Option<RcUnsafeCell<AbstractTask<'a, T>>>,
+
+    /// Last `exit` / `exit_group` status from the guest process.
+    pub exit_status: Option<i32>,
+    /// Guest path reported by `/proc/self/exe`.
+    pub exec_path: Option<String>,
 }
 
 #[repr(C)]
@@ -94,7 +100,8 @@ impl <'a, T: Clone> AndroidEmulator<'a, T> {
         env_fixer::enable_vfp(&backend)?; // enableVFP | init memory
 
         let (mut memory, errno) = AndroidElfLoader::new(backend.clone(), pid, proc_name.clone())?;
-        memory.add_hook_listeners(Box::new(ArmLD64::new(&mut svc)?));
+        memory.add_hook_listeners(Box::new(Libc::new()));
+        memory.add_hook_listeners(Box::new(ArmLD64::new(&mut svc, &backend)?));
 
         Ok(AndroidEmulator {
             inner: Arc::new(UnsafeCell::new(AndroidEmulatorInner {
@@ -112,7 +119,9 @@ impl <'a, T: Clone> AndroidEmulator<'a, T> {
                 dalvik: None,
                 context_task: None,
                 brk: 0,
-                base_path: std::env::var("BASE_PATH").unwrap_or("./android/sdk23".to_string()),
+                base_path: crate::android::sdk::default_sdk_root(),
+                exit_status: None,
+                exec_path: None,
             })),
             backend
         })
@@ -273,10 +282,20 @@ impl <'a, T: Clone> AndroidEmulator<'a, T> {
         self.inner_mut().running.store(true, Ordering::SeqCst);
         self.set_task_status(TaskStatus::R)
             .expect("failed to set task status");
-        self.backend.emu_start(begin, until, 0, 0)
-            .map_err(|e| error!("failed to start emulator: {:?}", e))
-            .expect("failed to start emulator");
+        log::debug!("emulate start begin=0x{:x} until=0x{:x}", begin, until);
+        if let Err(e) = self.backend.emu_start(begin, until, 0, 0) {
+            let pc = self.backend.reg_read(RegisterARM64::PC).unwrap_or(0);
+            warn!("emulate fault begin=0x{:x} pc=0x{:x}: {:#}", begin, pc, e);
+            self.inner_mut().running.store(false, Ordering::SeqCst);
+            let _ = self.set_task_status(TaskStatus::X);
+            return Some(0);
+        }
         self.inner_mut().running.store(false, Ordering::SeqCst);
+        log::debug!(
+            "emulate stop begin=0x{:x} pc=0x{:x}",
+            begin,
+            self.backend.reg_read(RegisterARM64::PC).unwrap_or(0)
+        );
 
         if self.get_task_status() != TaskStatus::X {
             return None;
@@ -329,6 +348,56 @@ impl<'a, T: Clone> AndroidEmulator<'a, T> {
         let f64 = Function64::<T>::new(self.inner_mut().pid, begin, LR, args, false);
         while self.inner_mut().running.load(Ordering::SeqCst) {}
         self.run_main_for_result(AbstractTask::Function64(f64))
+    }
+
+    /// Resolve a `STT_GNU_IFUNC` / `R_AARCH64_IRELATIVE` resolver.
+    /// Bionic resolvers take `(hwcap, __ifunc_arg_t*)`. HWCAP_CPUID (bit 11) is
+    /// left unset so they do not `mrs MIDR_EL1` (unimplemented in Dynarmic).
+    pub fn resolve_gnu_ifunc(&self, resolver: u64) -> u64 {
+        let hwcap = crate::android::sdk::GUEST_HWCAP;
+        let Ok(arg) = self.falloc(32, false) else {
+            return resolver;
+        };
+        let _ = arg.write_u64(24);
+        let _ = arg.write_u64_with_offset(8, hwcap);
+        let _ = arg.write_u64_with_offset(16, 0);
+        self.e_func(
+            resolver,
+            vec![UnicornArg::U64(hwcap), UnicornArg::Ptr(arg.addr)],
+        )
+        .filter(|a| *a != 0)
+        .unwrap_or(resolver)
+    }
+
+    /// unidbg `eEntry`: run `begin` with guest SP already prepared.
+    pub fn e_entry(&self, begin: u64, sp: u64) -> Option<u64> {
+        let f64 = Function64::<T>::new_entry(self.inner_mut().pid, begin, LR, sp);
+        while self.inner_mut().running.load(Ordering::SeqCst) {}
+        self.run_main_for_result(AbstractTask::Function64(f64))
+    }
+
+    pub fn last_exit_status(&self) -> Option<i32> {
+        self.inner_mut().exit_status
+    }
+
+    pub fn set_exec_path(&self, path: impl Into<String>) {
+        self.inner_mut().exec_path = Some(path.into());
+    }
+
+    /// Load an ELF shared object or PIE executable. Matches unidbg `emulator.loadLibrary`.
+    pub fn load_library(&self, elf_file_path: &str, force_init: bool) -> anyhow::Result<RcUnsafeCell<LinuxModule<'a, T>>> {
+        let file_data = std::fs::read(elf_file_path)
+            .map_err(|e| anyhow!("unable to read elf file {}: {}", elf_file_path, e))?;
+        let memory = &mut self.inner_mut().memory;
+        let library = memory.load_internal(
+            LibraryFile::Elf(ElfLibraryFile::new(file_data, elf_file_path.to_string())),
+            force_init,
+            self,
+        )?;
+        if std::env::var("RELEASE_CACHED_LIBRARIES").map_or(true, |v| v == "1") {
+            memory.release_cached_library();
+        }
+        Ok(library)
     }
 
     pub(crate) fn run_main_for_result<'b>(&self, luo_task: AbstractTask<'a, T>) -> Option<u64> {

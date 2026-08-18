@@ -122,7 +122,17 @@ impl<'a, T: Clone> Dynarmic<'a, T> {
 
             let ret = ffi::dynarmic_emu_start(self.cur_handle, pc);
             if ret != 0 {
-                return Err(anyhow!("Failed to start emulator: code={}", ret));
+                return Err(anyhow!(
+                    "Failed to start emulator: code={} ({})",
+                    ret,
+                    match ret {
+                        -3 => "memory fault",
+                        -4 => "too many cache invalidations",
+                        -5 => "host access violation",
+                        -6 => "tick budget exhausted",
+                        _ => "unknown",
+                    }
+                ));
             }
             Ok(())
         }

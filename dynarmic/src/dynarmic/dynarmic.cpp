@@ -16,6 +16,7 @@
 #include "dynarmic/interface/A64/a64.h"
 #include "dynarmic/interface/A64/config.h"
 #include "dynarmic/interface/exclusive_monitor.h"
+#include "dynarmic/interface/halt_reason.h"
 #include "dynarmic.h"
 
 #pragma clang diagnostic push
@@ -44,6 +45,21 @@ public:
     explicit DynarmicCallbacks64(khash_t(memory) *memory)
             : memory{memory} {}
 
+    bool mem_fault = false;
+    u64 ticks_remaining = 0x10000000000ULL;
+
+    void Fault(const char *kind, u64 vaddr) {
+        if (!mem_fault) {
+            fprintf(stderr, "dynarmic %s fault vaddr=%p pc=%p\n",
+                    kind, (void *) vaddr, cpu ? (void *) cpu->GetPC() : nullptr);
+            fflush(stderr);
+        }
+        mem_fault = true;
+        if (cpu) {
+            cpu->HaltExecution();
+        }
+    }
+
     bool IsReadOnlyMemory(u64 vaddr) override {
 //        u64 idx;
 //        return mem_map && (idx = vaddr >> DYN_PAGE_BITS) < num_page_table_entries && mem_map[idx] & PAGE_EXISTS_BIT && (mem_map[idx] & UC_PROT_WRITE) == 0;
@@ -51,9 +67,15 @@ public:
     }
 
     std::optional<std::uint32_t> MemoryReadCode(u64 vaddr) override {
-        u32 code = MemoryRead32(vaddr);
-//        printf("MemoryReadCode[%s->%s:%d]: vaddr=0x%llx, code=0x%08x\n", __FILE__, __func__, __LINE__, vaddr, code);
-        return code;
+        if (mem_fault) {
+            return std::nullopt;
+        }
+        char *page = get_memory_page(memory, vaddr, num_page_table_entries, page_table);
+        if (!page) {
+            Fault("MemoryReadCode", vaddr);
+            return std::nullopt;
+        }
+        return MemoryRead32(vaddr);
     }
 
     u8 MemoryRead8(u64 vaddr) override {
@@ -61,8 +83,8 @@ public:
         if(dest) {
             return dest[0];
         } else {
-            fprintf(stderr, "MemoryRead8[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
-            abort();
+            Fault("MemoryRead8", vaddr);
+            return 0;
         }
     }
     u16 MemoryRead16(u64 vaddr) override {
@@ -75,11 +97,14 @@ public:
         if(dest) {
             return dest[0];
         } else {
-            fprintf(stderr, "MemoryRead16[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
-            abort();
+            Fault("MemoryRead16", vaddr);
+            return 0;
         }
     }
     u32 MemoryRead32(u64 vaddr) override {
+        if (mem_fault) {
+            return 0;
+        }
         if(vaddr & 3) {
             const u16 a{MemoryRead16(vaddr)};
             const u16 b{MemoryRead16(vaddr + sizeof(u16))};
@@ -89,8 +114,8 @@ public:
         if(dest) {
             return dest[0];
         } else {
-            fprintf(stderr, "MemoryRead32[%s->%s:%d]: vaddr=%p, pc=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr, (void*) cpu->GetPC());
-            abort();
+            Fault("MemoryRead32", vaddr);
+            return 0;
         }
     }
     u64 MemoryRead64(u64 vaddr) override {
@@ -103,8 +128,8 @@ public:
         if(dest) {
             return dest[0];
         } else {
-            fprintf(stderr, "MemoryRead64[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
-            abort();
+            Fault("MemoryRead64", vaddr);
+            return 0;
         }
     }
     Dynarmic::A64::Vector MemoryRead128(u64 vaddr) override {
@@ -116,8 +141,7 @@ public:
         if(dest) {
             dest[0] = value;
         } else {
-            fprintf(stderr, "MemoryWrite8[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
-            abort();
+            Fault("MemoryWrite8", vaddr);
         }
     }
     void MemoryWrite16(u64 vaddr, u16 value) override {
@@ -130,8 +154,7 @@ public:
         if(dest) {
             dest[0] = value;
         } else {
-            fprintf(stderr, "MemoryWrite16[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
-            abort();
+            Fault("MemoryWrite16", vaddr);
         }
 
     }
@@ -145,8 +168,7 @@ public:
         if(dest) {
             dest[0] = value;
         } else {
-            fprintf(stderr, "MemoryWrite32[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
-            abort();
+            Fault("MemoryWrite32", vaddr);
         }
     }
     void MemoryWrite64(u64 vaddr, u64 value) override {
@@ -159,8 +181,7 @@ public:
         if(dest) {
             dest[0] = value;
         } else {
-            fprintf(stderr, "MemoryWrite64[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
-            abort();
+            Fault("MemoryWrite64", vaddr);
         }
     }
     void MemoryWrite128(u64 vaddr, Dynarmic::A64::Vector value) override {
@@ -193,36 +214,18 @@ public:
         cpu->HaltExecution();
         std::optional<std::uint32_t> code = MemoryReadCode(pc);
         if(code) {
-            fprintf(stderr, "Unicorn fallback @ 0x%lx for %lu instructions (instr = 0x%08X)", pc, num_instructions, *code);
+            fprintf(stderr, "Unicorn fallback @ 0x%lx for %lu instructions (instr = 0x%08X)\n", pc, num_instructions, *code);
         }
-        abort();
+        Fault("InterpreterFallback", pc);
     }
 
     void ExceptionRaised(u64 pc, Dynarmic::A64::Exception exception) override {
-        bool isBrk = false;
-        switch (exception) {
-            case Dynarmic::A64::Exception::Yield:
-                return;
-            case Dynarmic::A64::Exception::Breakpoint: // brk
-                isBrk = true;
-            case Dynarmic::A64::Exception::WaitForInterrupt:
-            case Dynarmic::A64::Exception::WaitForEvent:
-            case Dynarmic::A64::Exception::SendEvent:
-            case Dynarmic::A64::Exception::SendEventLocal:
-            default:
-                break;
+        if (exception == Dynarmic::A64::Exception::Yield) {
+            return;
         }
-        cpu->SetPC(pc);
-        if(!isBrk) {
-            std::optional<std::uint32_t> code = MemoryReadCode(pc);
-            if(code) {
-                printf("ExceptionRaised[%s->%s:%d]: pc=0x%lx, exception=%d, code=0x%08X\n", __FILE__, __func__, __LINE__, pc, static_cast<std::uint32_t>(exception), *code);
-            }
-        }
-
-        if(!isBrk) {
-            abort();
-        }
+        fprintf(stderr, "dynarmic exception=%d pc=%p\n",
+                static_cast<int>(exception), (void *) pc);
+        Fault("ExceptionRaised", pc);
     }
 
     void CallSVC(u32 swi) override {
@@ -238,10 +241,15 @@ public:
     }
 
     void AddTicks(u64 ticks) override {
+        if (ticks_remaining > ticks) {
+            ticks_remaining -= ticks;
+        } else {
+            ticks_remaining = 0;
+        }
     }
 
     u64 GetTicksRemaining() override {
-        return 0x10000000000ULL;
+        return ticks_remaining;
     }
 
     u64 GetCNTPCT() override {
@@ -271,7 +279,7 @@ typedef struct dynarmic {
 } *t_dynarmic;
 
 FQL int dynarmic_version() {
-    return 20240814;
+    return 20260819;
 }
 
 FQL const char* dynarmic_colorful_egg() {
@@ -325,6 +333,9 @@ FQL dynarmic* dynarmic_new(
     auto *callbacks = new DynarmicCallbacks64(backend->memory);
 
     Dynarmic::A64::UserConfig config;
+    // Cooperative guest threads invalidate return-stack predictions.
+    config.optimizations = Dynarmic::all_safe_optimizations
+        & ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
     config.callbacks = callbacks;
     config.tpidrro_el0 = &callbacks->tpidrro_el0;
     config.tpidr_el0 = &callbacks->tpidr_el0;
@@ -360,8 +371,10 @@ FQL dynarmic* dynarmic_new(
         // Unpredictable instructions
         config.define_unpredictable_behaviour = true;
 
-        // Memory
-        config.page_table = backend->page_table;
+        // Keep the hash/page table for callback lookups, but do not let the
+        // JIT load through it. A stale or null entry is a host AV; callbacks
+        // Fault() instead.
+        config.page_table = nullptr;
         config.page_table_address_space_bits = PAGE_TABLE_ADDRESS_SPACE_BITS;
         config.silently_mirror_page_table = false;
         config.absolute_offset_page_table = false;
@@ -392,6 +405,12 @@ FQL void dynarmic_destroy(dynarmic *dynarmic) {
         fprintf(stderr, "dynarmic_destroy failed[%s->%s:%d]: dynarmic is null\n", __FILE__, __func__, __LINE__);
         return;
     }
+    // Tear the JIT down before unmapping guest pages; its destructor
+    // still walks cached blocks that point at those host pages.
+    delete dynarmic->jit64;
+    dynarmic->jit64 = nullptr;
+    delete dynarmic->cb64;
+    dynarmic->cb64 = nullptr;
     khash_t(memory) *memory = dynarmic->memory;
     for (auto k = kh_begin(memory); k < kh_end(memory); k++) {
         if(kh_exist(memory, k)) {
@@ -404,9 +423,6 @@ FQL void dynarmic_destroy(dynarmic *dynarmic) {
         }
     }
     kh_destroy(memory, memory);
-    Dynarmic::A64::Jit *jit64 = dynarmic->jit64;
-    delete jit64;
-    delete dynarmic->cb64;
     if(dynarmic->page_table) {
         int ret = munmap(dynarmic->page_table, dynarmic->num_page_table_entries * sizeof(void*));
         if(ret != 0) {
@@ -461,6 +477,9 @@ FQL int dynarmic_munmap(dynarmic* dynarmic, u64 address, u64 size) {
         }
         free(page);
         kh_del(memory, memory, k);
+    }
+    if (dynarmic->jit64) {
+        dynarmic->jit64->InvalidateCacheRange(address, size);
     }
     return 0;
 }
@@ -546,7 +565,6 @@ FQL int dynarmic_mem_write(dynarmic* dynarmic, u64 address, char* data, usize si
         u64 len = end - start;
         char *addr = get_memory_page(memory, vaddr, dynarmic->num_page_table_entries, dynarmic->page_table);
         if(addr == nullptr) {
-            fprintf(stderr, "mem_write failed[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
             return 1;
         }
         char *dest = &addr[start];
@@ -570,7 +588,6 @@ FQL int dynarmic_mem_read(dynarmic* dynarmic, u64 address, char* bytes, usize si
         u64 len = end - start;
         char *addr = get_memory_page(memory, vaddr, dynarmic->num_page_table_entries, dynarmic->page_table);
         if(addr == nullptr) {
-            fprintf(stderr, "mem_read failed[%s->%s:%d]: vaddr=%p\n", __FILE__, __func__, __LINE__, (void*)vaddr);
             return 1;
         }
         char *src = &addr[start];
@@ -689,9 +706,62 @@ FQL int dynarmic_emu_start(dynarmic* dynarmic, u64 pc) {
         return -2;
     }
     Dynarmic::A64::Jit *cpu = dynarmic->jit64;
+    dynarmic->cb64->mem_fault = false;
+    // ~80M IR ticks is far above a syscall body and below a livelock.
+    dynarmic->cb64->ticks_remaining = 80'000'000ULL;
+    cpu->ClearExclusiveState();
+    if (dynarmic->monitor) {
+        dynarmic->monitor->Clear();
+    }
+    cpu->ClearHalt(Dynarmic::HaltReason::UserDefined1);
+    cpu->ClearHalt(Dynarmic::HaltReason::UserDefined2);
+    cpu->ClearHalt(Dynarmic::HaltReason::CacheInvalidation);
+    cpu->ClearHalt(Dynarmic::HaltReason::MemoryAbort);
+    cpu->ClearHalt(Dynarmic::HaltReason::Step);
     cpu->SetPC(pc);
-    cpu->Run();
-    return 0;
+    int rc = -4;
+    for (int i = 0; i < 1024; i++) {
+        Dynarmic::HaltReason hr;
+#if defined(_WIN32)
+        __try {
+            hr = cpu->Run();
+        } __except (1) {
+            fprintf(stderr, "dynarmic Run access violation pc=%p\n",
+                    (void *) cpu->GetPC());
+            fflush(stderr);
+            rc = -5;
+            break;
+        }
+#else
+        try {
+            hr = cpu->Run();
+        } catch (...) {
+            fprintf(stderr, "dynarmic Run exception pc=%p\n",
+                    (void *) cpu->GetPC());
+            fflush(stderr);
+            rc = -5;
+            break;
+        }
+#endif
+        if (dynarmic->cb64->mem_fault || Dynarmic::Has(hr, Dynarmic::HaltReason::MemoryAbort)) {
+            rc = -3;
+            break;
+        }
+        if (dynarmic->cb64->ticks_remaining == 0) {
+            fprintf(stderr, "dynarmic tick budget exhausted pc=%p\n",
+                    (void *) cpu->GetPC());
+            fflush(stderr);
+            rc = -6;
+            break;
+        }
+        if (Dynarmic::Has(hr, Dynarmic::HaltReason::CacheInvalidation)) {
+            cpu->ClearHalt(Dynarmic::HaltReason::CacheInvalidation);
+            continue;
+        }
+        rc = 0;
+        break;
+    }
+    return rc;
 }
 
 FQL int dynarmic_emu_stop(dynarmic* dynarmic) {

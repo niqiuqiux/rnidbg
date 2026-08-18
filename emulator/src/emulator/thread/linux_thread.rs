@@ -12,6 +12,10 @@ pub struct MarshmallowThread<'a, T: Clone> {
     base_thread_task: Rc<UnsafeCell<BaseThreadTask<'a, T>>>,
     pub fn_: VMPointer<'a, T>,
     thread: VMPointer<'a, T>,
+    /// CLONE_SETTLS value (bionic TCB+24). Zero means Marshmallow `pthread+0xb0`.
+    tls: u64,
+    /// Child stack at the clone SVC (`[fn, arg]` already stored at this address).
+    child_stack: u64,
     tid_ptr: Option<VMPointer<'a, T>>,
     errno: Option<VMPointer<'a, T>>,
 }
@@ -23,10 +27,12 @@ impl<'a, T: Clone> MarshmallowThread<'a, T> {
         fn_: VMPointer<'a, T>,
         thread: VMPointer<'a, T>,
         tid_ptr: Option<VMPointer<'a, T>>,
+        tls: u64,
+        child_stack: u64,
     ) -> Self {
         Self {
             base_thread_task: Rc::new(UnsafeCell::new(BaseThreadTask::new(tid, emulator.get_lr().unwrap()))),
-            fn_, thread, tid_ptr,
+            fn_, thread, tls, child_stack, tid_ptr,
             errno: None,
         }
     }
@@ -118,17 +124,36 @@ impl<'a, T: Clone> Task<'a, T> for MarshmallowThread<'a, T> {
     }
 
     fn dispatch(&mut self, emulator: &AndroidEmulator<'a, T>) -> anyhow::Result<Option<u64>> {
+        if self.is_context_saved() {
+            return self.thread_task_mut().dispatch_inner(emulator, self);
+        }
         let backend = emulator.backend.clone();
         let main_task = self.thread_task_mut();
-        let stack = main_task.allocate_stack(emulator);
-
-        let tls = self.thread.share(0xb0);
-        self.errno = Some(tls.share(16));
+        // After __bionic_clone `STP X5,X6,[X1,#-0x10]!`, X1 points at [fn, arg].
+        // Child pops those then runs with SP back at the pthread/stack top.
+        let sp = if self.child_stack != 0 {
+            self.child_stack.wrapping_add(16)
+        } else {
+            main_task.allocate_stack(emulator).addr
+        };
+        let tls = if self.tls != 0 {
+            self.tls
+        } else {
+            self.thread.share(0xb0).addr
+        };
+        // API 36 `__errno` is `*(TPIDR+8) + 768` (pthread.errno_value).
+        self.errno = Some(VMPointer::new(self.thread.addr.wrapping_add(768), 0, backend.clone()));
+        let start_routine = backend.mem_read_u64(self.thread.addr + 0x60).unwrap_or(0);
+        let start_arg = backend.mem_read_u64(self.thread.addr + 0x68).unwrap_or(0);
+        log::info!(
+            "MarshmallowThread start fn=0x{:x} pthread=0x{:x} routine=0x{:x} routine_arg=0x{:x} sp=0x{:x} tls=0x{:x}",
+            self.fn_.addr, self.thread.addr, start_routine, start_arg, sp, tls
+        );
         backend.reg_write(RegisterARM64::X0, self.thread.addr)
             .map_err(|e| anyhow!("[thread_addr] failed to write X0: {:?}", e))?;
-        backend.reg_write(RegisterARM64::SP, stack.addr)
+        backend.reg_write(RegisterARM64::SP, sp)
             .map_err(|e| anyhow!("[stack_addr] failed to write SP: {:?}", e))?;
-        backend.reg_write(RegisterARM64::TPIDR_EL0, tls.addr)
+        backend.reg_write(RegisterARM64::TPIDR_EL0, tls)
             .map_err(|e| anyhow!("[tls_addr] failed to write TPIDR_EL0: {:?}", e))?;
         backend.reg_write(RegisterARM64::LR, self.thread_task_mut().until)
             .map_err(|e| anyhow!("[base_thread_until] failed to write LR: {:?}", e))?;
@@ -172,7 +197,15 @@ impl<'a, T: Clone> Task<'a, T> for MarshmallowThread<'a, T> {
 
 impl<'a, T: Clone> LuoTask<'a, T> for MarshmallowThread<'a, T> {
     fn run(&self, emulator: &AndroidEmulator<'a, T>) -> anyhow::Result<Option<u64>> {
-        Ok(emulator.emulate(self.fn_.addr, self.thread_task_mut().until))
+        let ret = emulator.emulate(self.fn_.addr, self.thread_task_mut().until);
+        if ret.is_some() {
+            if let Some(tid_ptr) = &self.tid_ptr {
+                if tid_ptr.addr != 0 {
+                    let _ = tid_ptr.write_i32_with_offset(0, 0);
+                }
+            }
+        }
+        Ok(ret)
     }
 }
 

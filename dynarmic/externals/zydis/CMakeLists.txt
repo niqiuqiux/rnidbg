@@ -5,10 +5,16 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.15")
     cmake_policy(SET CMP0091 NEW)
 endif ()
 
-project(Zydis VERSION 4.0.0.0 LANGUAGES C CXX)
+project(Zydis VERSION 4.0.0.0 LANGUAGES C)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+
+# Set ZYDIS_ROOT_PROJECT to ON if this is the top-level project otherwise OFF by default.
+set(ZYDIS_ROOT_PROJECT OFF)
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+    set(ZYDIS_ROOT_PROJECT ON)
+endif()
 
 # =============================================================================================== #
 # Overridable options                                                                             #
@@ -43,16 +49,19 @@ option(ZYDIS_BUILD_SHARED_LIB
     OFF)
 option(ZYDIS_BUILD_EXAMPLES
     "Build examples"
-    ON)
+    ${ZYDIS_ROOT_PROJECT})
 option(ZYDIS_BUILD_TOOLS
     "Build tools"
-    ON)
+    ${ZYDIS_ROOT_PROJECT})
 option(ZYDIS_BUILD_MAN
     "Build manpages for the tools (requires Ronn-NG)"
     OFF)
 option(ZYDIS_BUILD_DOXYGEN
     "Build doxygen documentation (requires Doxygen)"
-    ON)
+    ${ZYDIS_ROOT_PROJECT})
+option(ZYDIS_BUILD_TESTS
+    "Build tests"
+    ${ZYDIS_ROOT_PROJECT})
 option(ZYDIS_FUZZ_AFL_FAST
     "Enables AFL persistent mode and reduces prints in ZydisFuzzIn"
     OFF)
@@ -62,7 +71,7 @@ option(ZYDIS_LIBFUZZER
 
 # Dependencies
 option(ZYAN_SYSTEM_ZYCORE
-    "Use system Zycore library"
+    "Force using system installed Zycore library"
     OFF)
 set(ZYAN_ZYCORE_PATH
     "${CMAKE_CURRENT_LIST_DIR}/dependencies/zycore"
@@ -74,35 +83,62 @@ set(ZYAN_ZYCORE_PATH
 # Dependencies                                                                                    #
 # =============================================================================================== #
 
-if (ZYAN_SYSTEM_ZYCORE)
-    find_package(Zycore)
-else ()
-    # Try to initialize the Zycore submodule using Git
-    if (NOT EXISTS "${ZYAN_ZYCORE_PATH}/CMakeLists.txt" AND 
-        "${ZYAN_ZYCORE_PATH}" STREQUAL "${CMAKE_CURRENT_LIST_DIR}/dependencies/zycore")
-        find_package(Git QUIET)
-        if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
-            execute_process(
-                COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive 
-                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} 
-            )
-        endif()
+# Tries to make Zycore available.
+#
+# Priorities:
+#
+# - ZYAN_ZYCORE_PATH specified path always takes maximum precedence if it exists.
+#   - Default value is the sub-module path. So if the sub-module is present, we pick that.
+#     Allows hacking on Zydis/Zycore even if a Zydis OS package is installed.
+# - Look for a system-installed Zycore package (via find_package).
+# - If git is installed & this is a git repository, try cloning the sub-module.
+# - Give up.
+#
+# This is in a function so we can elegantly early-exit once the library is found.
+function (locate_zycore)
+    if (NOT ${ZYAN_SYSTEM_ZYCORE} AND EXISTS "${ZYAN_ZYCORE_PATH}/CMakeLists.txt")
+        message(VERBOSE "Using ZYAN_ZYCORE_PATH specified Zycore")
+        add_subdirectory(${ZYAN_ZYCORE_PATH} "zycore" EXCLUDE_FROM_ALL)
+        return ()
     endif ()
 
-    if (NOT EXISTS "${ZYAN_ZYCORE_PATH}/CMakeLists.txt")
-        message(
-            FATAL_ERROR
-            "Can't find zycore submodule. Please make sure to clone the repo recursively.\n"
-            "You can fix this by running\n"
-            "    git submodule update --init\n"
-            "or by cloning using\n"
-            "    git clone --recursive <url>\n"
-            "Alternatively, you can manually clone zycore to some path and set ZYDIS_ZYCORE_PATH."
+    if (NOT "${ZYAN_ZYCORE_PATH}" STREQUAL "${CMAKE_CURRENT_LIST_DIR}/dependencies/zycore")
+        message(FATAL_ERROR "No CMake project found at explicitly set ZYAN_ZYCORE_PATH")
+    endif ()
+
+    find_package(Zycore QUIET)
+    if (Zycore_FOUND)
+        message(VERBOSE "Using system Zycore")
+        return ()
+    endif ()
+
+    if (ZYAN_SYSTEM_ZYCORE)
+        message(FATAL_ERROR "ZYAN_SYSTEM_ZYCORE set but no system-installed Zycore found")
+    endif ()
+
+    find_package(Git QUIET)
+    if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
+        message(VERBOSE "Pulling Zycore submodule with git.")
+        execute_process(
+                COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         )
-    endif ()
+        add_subdirectory(${ZYAN_ZYCORE_PATH} "zycore" EXCLUDE_FROM_ALL)
+        return ()
+    endif()
 
-    add_subdirectory(${ZYAN_ZYCORE_PATH} "zycore" EXCLUDE_FROM_ALL)
-endif ()
+    message(
+        FATAL_ERROR
+        "Can't find Zycore. Please make sure to clone the repo recursively.\n"
+        "You can fix this by running\n"
+        "    git submodule update --init\n"
+        "or by cloning using\n"
+        "    git clone --recursive <url>\n"
+        "Alternatively, you can manually clone zycore to some path and set ZYDIS_ZYCORE_PATH."
+    )
+endfunction ()
+
+locate_zycore()
 
 # =============================================================================================== #
 # Library configuration                                                                           #
@@ -114,8 +150,9 @@ else ()
     add_library("Zydis" STATIC)
     target_compile_definitions("Zydis" PUBLIC "ZYDIS_STATIC_BUILD")
 endif ()
+add_library("Zydis::Zydis" ALIAS "Zydis")
 
-target_link_libraries("Zydis" PUBLIC "Zycore")
+target_link_libraries("Zydis" PUBLIC "Zycore::Zycore")
 target_include_directories("Zydis"
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -176,7 +213,6 @@ target_sources("Zydis"
         "${CMAKE_CURRENT_LIST_DIR}/include/Zydis/MetaInfo.h"
         "${CMAKE_CURRENT_LIST_DIR}/include/Zydis/Mnemonic.h"
         "${CMAKE_CURRENT_LIST_DIR}/include/Zydis/Register.h"
-        "${CMAKE_CURRENT_LIST_DIR}/include/Zydis/Segment.h"
         "${CMAKE_CURRENT_LIST_DIR}/include/Zydis/SharedTypes.h"
         "${CMAKE_CURRENT_LIST_DIR}/include/Zydis/ShortString.h"
         "${CMAKE_CURRENT_LIST_DIR}/include/Zydis/Status.h"
@@ -187,7 +223,6 @@ target_sources("Zydis"
         "src/MetaInfo.c"
         "src/Mnemonic.c"
         "src/Register.c"
-        "src/Segment.c"
         "src/SharedData.c"
         "src/String.c"
         "src/Utils.c"
@@ -318,7 +353,10 @@ endif ()
 
 if (ZYDIS_BUILD_TOOLS AND NOT ZYAN_NO_LIBC)
     if (ZYDIS_FEATURE_DECODER AND ZYDIS_FEATURE_FORMATTER AND (NOT ZYDIS_MINIMAL_MODE))
-        add_executable("ZydisDisasm" "tools/ZydisDisasm.c")
+        add_executable("ZydisDisasm"
+            "tools/ZydisDisasm.c"
+            "tools/ZydisToolsShared.c"
+            "tools/ZydisToolsShared.h")
         target_link_libraries("ZydisDisasm" "Zydis")
         set_target_properties ("ZydisDisasm" PROPERTIES FOLDER "Tools")
         target_compile_definitions("ZydisDisasm" PRIVATE "_CRT_SECURE_NO_WARNINGS")
@@ -383,17 +421,22 @@ if (ZYDIS_BUILD_TOOLS AND NOT ZYAN_NO_LIBC)
                 target_compile_definitions("ZydisFuzzReEncoding" PRIVATE "ZYDIS_LIBFUZZER")
             endif ()
 
-            add_executable("ZydisTestEncoderAbsolute"
-                "tools/ZydisTestEncoderAbsolute.c")
-            target_link_libraries("ZydisTestEncoderAbsolute" "Zydis")
-            set_target_properties("ZydisTestEncoderAbsolute" PROPERTIES FOLDER "Tools")
-            target_compile_definitions("ZydisTestEncoderAbsolute" PRIVATE "_CRT_SECURE_NO_WARNINGS")
-            zyan_set_common_flags("ZydisTestEncoderAbsolute")
-            zyan_maybe_enable_wpo("ZydisTestEncoderAbsolute")
-            _maybe_set_emscripten_cfg("ZydisTestEncoderAbsolute")
+            if (NOT ZYDIS_BUILD_SHARED_LIB)
+                add_executable("ZydisTestEncoderAbsolute"
+                    "tools/ZydisTestEncoderAbsolute.c")
+                target_link_libraries("ZydisTestEncoderAbsolute" "Zydis")
+                set_target_properties("ZydisTestEncoderAbsolute" PROPERTIES FOLDER "Tools")
+                target_compile_definitions("ZydisTestEncoderAbsolute" PRIVATE "_CRT_SECURE_NO_WARNINGS")
+                zyan_set_common_flags("ZydisTestEncoderAbsolute")
+                zyan_maybe_enable_wpo("ZydisTestEncoderAbsolute")
+                _maybe_set_emscripten_cfg("ZydisTestEncoderAbsolute")
+            endif ()
         endif ()
 
-        add_executable("ZydisInfo" "tools/ZydisInfo.c")
+        add_executable("ZydisInfo"
+            "tools/ZydisInfo.c"
+            "tools/ZydisToolsShared.c"
+            "tools/ZydisToolsShared.h")
         target_link_libraries("ZydisInfo" "Zydis")
         set_target_properties ("ZydisInfo" PROPERTIES FOLDER "Tools")
         target_compile_definitions("ZydisInfo" PRIVATE "_CRT_SECURE_NO_WARNINGS")
@@ -479,7 +522,41 @@ if (ZYDIS_BUILD_MAN)
                 "--output-dir=${CMAKE_CURRENT_BINARY_DIR}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/man/${MAN_NAME}.ronn"
         )
-        install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${MAN_NAME}" TYPE MAN)
+        install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${MAN_NAME}" DESTINATION "${CMAKE_INSTALL_MANDIR}/man1")
     endforeach()
     add_custom_target(man ALL DEPENDS ${MAN_NAMES})
+endif ()
+
+# =============================================================================================== #
+# Tests                                                                                           #
+# =============================================================================================== #
+
+if (ZYDIS_BUILD_TESTS)
+    enable_testing()
+    find_package(Python 3 REQUIRED)
+
+    if (TARGET ZydisInfo)
+        add_test(
+            NAME "ZydisRegression"
+            COMMAND 
+                "${Python_EXECUTABLE}"
+                regression.py
+                test
+                $<TARGET_FILE:ZydisInfo>
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/tests"
+        )
+    endif ()
+
+    if (TARGET ZydisFuzzReEncoding AND TARGET ZydisFuzzEncoder AND TARGET ZydisTestEncoderAbsolute)
+        add_test(
+            NAME "ZydisRegressionEncoder"
+            COMMAND 
+                "${Python_EXECUTABLE}"
+                regression_encoder.py
+                $<TARGET_FILE:ZydisFuzzReEncoding>
+                $<TARGET_FILE:ZydisFuzzEncoder>
+                $<TARGET_FILE:ZydisTestEncoderAbsolute>
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/tests"
+        )
+    endif ()
 endif ()

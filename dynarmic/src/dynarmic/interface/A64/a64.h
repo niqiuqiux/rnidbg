@@ -72,10 +72,6 @@ public:
     /// Modify Stack Pointer
     void SetSP(std::uint64_t value);
 
-    int SetTPIDRRO_EL0(u64 value);
-    int SetTPIDR_EL0(u64 value);
-    u64 GetTPIDR_EL0();
-
     /// Read Program Counter
     std::uint64_t GetPC() const;
     /// Modify Program Counter
@@ -128,15 +124,13 @@ public:
     /// Debugging: Dump a disassembly all of compiled code to the console.
     void DumpDisassembly() const;
 
-    void** GetPageTable() const;
-
     /*
      * Disassemble the instructions following the current pc and return
      * the resulting instructions as a vector of their string representations.
      */
-    [[nodiscard]] std::vector<std::string> Disassemble() const;
+    std::vector<std::string> Disassemble() const;
 
-public:
+private:
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

@@ -769,7 +769,6 @@ static void decode_opc(CPURISCVState *env, DisasContext *ctx, uint16_t opcode)
                              translator_lduw(tcg_ctx, env, ctx->base.pc_next + 2));
         ctx->pc_succ_insn = ctx->base.pc_next + 4;
         if (!decode_insn32(ctx, opcode32)) {
-            ctx->pc_succ_insn = ctx->base.pc_next - 4;
             gen_exception_illegal(ctx);
         }
     }
@@ -920,6 +919,13 @@ static void riscv_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
     }
 }
 
+static void riscv_sync_pc(DisasContextBase *db, CPUState *cpu)
+{
+    DisasContext *dc = container_of(db, DisasContext, base);
+    TCGContext *tcg_ctx = dc->uc->tcg_ctx;
+    tcg_gen_movi_tl(tcg_ctx, tcg_ctx->cpu_pc, dc->base.pc_next);
+}
+
 static const TranslatorOps riscv_tr_ops = {
     .init_disas_context = riscv_tr_init_disas_context,
     .tb_start           = riscv_tr_tb_start,
@@ -927,6 +933,7 @@ static const TranslatorOps riscv_tr_ops = {
     .breakpoint_check   = riscv_tr_breakpoint_check,
     .translate_insn     = riscv_tr_translate_insn,
     .tb_stop            = riscv_tr_tb_stop,
+    .pc_sync            = riscv_sync_pc
 };
 
 void gen_intermediate_code(CPUState *cs, TranslationBlock *tb, int max_insns)

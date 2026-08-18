@@ -7,12 +7,8 @@ pub(crate) fn resolve_library_static<T: Clone>(emulator: &AndroidEmulator<T>, li
     if option_env!("EMU_LOG") == Some("1") {
         info!("resolve_library_static: {}", library_name);
     }
-    let base_path = emulator.inner_mut().base_path.as_str();
-    let path = Path::new(&if base_path.is_empty() {
-        "./android/sdk23/system/lib64".to_string()
-    } else {
-        format!("{}/system/lib64", base_path)
-    }).join(library_name);
+    let base_path = emulator.inner_mut().base_path.clone();
+    let path = Path::new(&crate::android::sdk::lib64_dir(&base_path)).join(library_name);
 
     if !path.exists() {
         error!("Library not found: {}", path.to_str().unwrap());

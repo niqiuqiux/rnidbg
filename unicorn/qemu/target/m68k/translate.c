@@ -5996,10 +5996,8 @@ DISAS_INSN(to_mext)
         gen_helper_set_mac_extu(tcg_ctx, tcg_ctx->cpu_env, val, acc);
 }
 
-static disas_proc opcode_table[65536];
-
 static void
-register_opcode (disas_proc proc, uint16_t opcode, uint16_t mask)
+register_opcode (CPUM68KState *env, disas_proc proc, uint16_t opcode, uint16_t mask)
 {
   int i;
   int from;
@@ -6029,7 +6027,7 @@ register_opcode (disas_proc proc, uint16_t opcode, uint16_t mask)
   to = from + i;
   for (i = from; i < to; i++) {
       if ((i & mask) == opcode)
-          opcode_table[i] = proc;
+          env->opcode_table[i] = proc;
   }
 }
 
@@ -6043,16 +6041,16 @@ void register_m68k_insns (CPUM68KState *env)
      * Build the opcode table only once to avoid
      * multithreading issues.
      */
-    if (opcode_table[0] != NULL) {
-        return;
-    }
+    // if (opcode_table[0] != NULL) {
+    //     return;
+    // }
 
     /*
      * use BASE() for instruction available
      * for CF_ISA_A and M68000.
      */
 #define BASE(name, opcode, mask) \
-    register_opcode(disas_##name, 0x##opcode, 0x##mask)
+    register_opcode(env, disas_##name, 0x##opcode, 0x##mask)
 #define INSN(name, opcode, mask, feature) do { \
     if (m68k_feature(env, M68K_FEATURE_##feature)) \
         BASE(name, opcode, mask); \
@@ -6344,7 +6342,7 @@ static void m68k_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
 
     insn = read_im16(env, dc);
 
-    opcode_table[insn](env, dc, insn);
+    ((disas_proc)env->opcode_table[insn])(env, dc, insn);
     do_writebacks(dc);
     do_release(dc);
 
@@ -6414,6 +6412,13 @@ static void m68k_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
     }
 }
 
+void m68k_sync_pc(DisasContextBase *db, CPUState *cpu)
+{
+    DisasContext *dc = container_of(db, DisasContext, base);
+
+    tcg_gen_movi_i32(dc->uc->tcg_ctx, QREG_PC, dc->base.pc_next);
+}
+
 static const TranslatorOps m68k_tr_ops = {
     .init_disas_context = m68k_tr_init_disas_context,
     .tb_start           = m68k_tr_tb_start,
@@ -6421,6 +6426,7 @@ static const TranslatorOps m68k_tr_ops = {
     .breakpoint_check   = m68k_tr_breakpoint_check,
     .translate_insn     = m68k_tr_translate_insn,
     .tb_stop            = m68k_tr_tb_stop,
+    .pc_sync            = m68k_sync_pc
 };
 
 void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb, int max_insns)

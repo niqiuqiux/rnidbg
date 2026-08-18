@@ -4,6 +4,8 @@ set -e
 
 FILTER="grep -v warning"
 CXX=${CXX:=g++}
+CFLAGS_USER=${CFLAGS}
+CFLAGS_WARN="$(cat CFLAGS_WARN.cfg)"
 
 case $1 in
 Y)
@@ -34,7 +36,7 @@ Y64)
 	;;
 esac
 
-CFLAGS="-Wall -I../ $OPT2 -DUSE_AVX"
+CFLAGS="$CFLAGS_USER $CFLAGS_WARN -g -I../ $OPT2 -DUSE_AVX"
 echo "compile make_nm.cpp"
 $CXX $CFLAGS make_nm.cpp -o make_nm
 

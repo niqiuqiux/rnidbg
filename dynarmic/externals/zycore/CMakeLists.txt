@@ -9,7 +9,7 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.15")
     cmake_policy(SET CMP0091 NEW)
 endif ()
 
-project(Zycore VERSION 1.4.0.0 LANGUAGES C)
+project(Zycore VERSION 1.5.2.0 LANGUAGES C)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -118,12 +118,14 @@ else ()
     add_library("Zycore" STATIC)
     target_compile_definitions("Zycore" PUBLIC "ZYCORE_STATIC_BUILD")
 endif ()
+add_library("Zycore::Zycore" ALIAS "Zycore")
 
 set_target_properties("Zycore" PROPERTIES
     LINKER_LANGUAGE C
     VERSION "${Zycore_VERSION}"
     SOVERSION "${Zycore_VERSION_MAJOR}.${Zycore_VERSION_MINOR}"
-    DEFINE_SYMBOL "ZYCORE_SHOULD_EXPORT")
+    DEFINE_SYMBOL "ZYCORE_SHOULD_EXPORT"
+    C_VISIBILITY_PRESET hidden)
 target_include_directories("Zycore"
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -228,10 +230,16 @@ install(DIRECTORY "include/" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 find_package(Doxygen)
 if (DOXYGEN_FOUND)
+    set(DOXYGEN_GENERATE_MAN YES)
     doxygen_add_docs(ZycoreDoc "include/Zycore/" ALL)
     install(
         DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/html/"
         DESTINATION "${CMAKE_INSTALL_DOCDIR}/api"
+        COMPONENT Documentation
+    )
+    install(
+        DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/man/man3/"
+        DESTINATION "${CMAKE_INSTALL_MANDIR}/man3"
         COMPONENT Documentation
     )
 endif()

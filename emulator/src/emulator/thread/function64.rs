@@ -15,6 +15,8 @@ pub struct Function64<'a, T: Clone> {
     pub padding_argument: bool,
     pub address: u64,
     pub args: Vec<UnicornArg>,
+    /// When set, skip `init_args` and use this SP (unidbg `Entry` / `eEntry`).
+    pub entry_sp: Option<u64>,
 }
 
 impl<'a, T: Clone> Function64<'a, T> {
@@ -24,6 +26,17 @@ impl<'a, T: Clone> Function64<'a, T> {
             padding_argument,
             address,
             args,
+            entry_sp: None,
+        }
+    }
+
+    pub fn new_entry(pid: u32, address: u64, until: u64, sp: u64) -> Self {
+        Self {
+            main_task: Rc::new(UnsafeCell::new(BaseMainTask::new(pid, until))),
+            padding_argument: false,
+            address,
+            args: vec![],
+            entry_sp: Some(sp),
         }
     }
 
@@ -39,11 +52,15 @@ impl<'a, T: Clone> Function64<'a, T> {
 impl<'a, T: Clone> LuoTask<'a, T> for Function64<'a, T> {
     fn run(&self, emulator: &AndroidEmulator<'a, T>) -> anyhow::Result<Option<u64>> {
         let backend = emulator.backend.clone();
-        let sp = emulator.inner_mut().memory.sp;
-        if sp % 16 != 0 {
-            info!("SP NOT 16 bytes aligned");
+        if let Some(sp) = self.entry_sp {
+            emulator.inner_mut().memory.set_stack_point(sp);
+        } else {
+            let sp = emulator.inner_mut().memory.sp;
+            if sp % 16 != 0 {
+                info!("SP NOT 16 bytes aligned");
+            }
+            init_args(emulator, self.padding_argument, self.args.clone());
         }
-        init_args(emulator, self.padding_argument, self.args.clone());
 
         let sp = emulator.inner_mut().memory.sp;
         if sp % 16 != 0 {

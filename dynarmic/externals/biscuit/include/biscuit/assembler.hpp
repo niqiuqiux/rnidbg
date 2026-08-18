@@ -4,6 +4,7 @@
 #include <biscuit/csr.hpp>
 #include <biscuit/isa.hpp>
 #include <biscuit/label.hpp>
+#include <biscuit/literal.hpp>
 #include <biscuit/registers.hpp>
 #include <biscuit/vector.hpp>
 #include <cstddef>
@@ -112,6 +113,18 @@ public:
         m_buffer.RewindCursor(offset);
     }
 
+    /**
+     * Allows advancing of the code buffer cursor.
+     * 
+     * @param offset The offset to advance the cursor by.
+     *
+     * @note The offset may not be smaller than the current cursor offset 
+     *       and may not be larger than the current buffer capacity.
+     */
+    void AdvanceBuffer(ptrdiff_t offset) {
+        m_buffer.AdvanceCursor(offset);
+    }
+
     /// Retrieves the cursor pointer for the underlying code buffer.
     [[nodiscard]] uint8_t* GetCursorPointer() noexcept {
         return m_buffer.GetCursorPointer();
@@ -120,6 +133,11 @@ public:
     /// Retrieves the cursor for the underlying code buffer.
     [[nodiscard]] const uint8_t* GetCursorPointer() const noexcept {
         return m_buffer.GetCursorPointer();
+    }
+
+    /// Sets the cursor pointer for the underlying code buffer.
+    void SetCursorPointer(uint8_t* ptr) noexcept {
+        m_buffer.SetCursorPointer(ptr);
     }
 
     /// Retrieves the pointer to an arbitrary location within the underlying code buffer.
@@ -138,6 +156,16 @@ public:
      * @param label A non-null valid label to bind.
      */
     void Bind(Label* label);
+
+    /**
+     * Places a literal at the current offset within the code buffer.
+     *
+     * @param literal A non-null valid literal to place.
+    */
+    template <typename T>
+    void Place(Literal<T>* literal) {
+        PlaceAtOffset(literal, m_buffer.GetCursorOffset());
+    }
 
     // RV32I Instructions
 
@@ -202,6 +230,7 @@ public:
     void JALR(GPR rs) noexcept;
     void JALR(GPR rd, int32_t imm, GPR rs1) noexcept;
     void JR(GPR rs) noexcept;
+    void JR(GPR rs, int32_t imm) noexcept;
 
     void LB(GPR rd, int32_t imm, GPR rs) noexcept;
     void LBU(GPR rd, int32_t imm, GPR rs) noexcept;
@@ -257,6 +286,15 @@ public:
     void ADDIW(GPR rd, GPR rs, int32_t imm) noexcept;
     void ADDW(GPR rd, GPR lhs, GPR rhs) noexcept;
     void LD(GPR rd, int32_t imm, GPR rs) noexcept;
+    template <typename T>
+    void LD(GPR rd, Literal<T>* literal) noexcept {
+        static_assert(sizeof(T) >= 8);
+        const auto offset = LinkAndGetOffset(literal);
+        const auto hi20 = static_cast<int32_t>((static_cast<uint32_t>(offset) + 0x800) >> 12 & 0xFFFFF);
+        const auto lo12 = static_cast<int32_t>(offset << 20) >> 20;
+        AUIPC(rd, hi20);
+        LD(rd, lo12, rd);
+    }
     void LWU(GPR rd, int32_t imm, GPR rs) noexcept;
     void SD(GPR rs2, int32_t imm, GPR rs1) noexcept;
 
@@ -287,9 +325,40 @@ public:
     void AMOCAS_Q(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
     void AMOCAS_W(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
 
+    // Zabha Extension Instructions
+    void AMOADD_B(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOAND_B(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOMAX_B(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOMAXU_B(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOMIN_B(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOMINU_B(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOOR_B(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOSWAP_B(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOXOR_B(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOCAS_B(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+
+    void AMOADD_H(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOAND_H(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOMAX_H(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOMAXU_H(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOMIN_H(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOMINU_H(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOOR_H(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOSWAP_H(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOXOR_H(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void AMOCAS_H(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+
     // Zicond Extension Instructions
     void CZERO_EQZ(GPR rd, GPR value, GPR condition) noexcept;
     void CZERO_NEZ(GPR rd, GPR value, GPR condition) noexcept;
+
+
+    // XTheadCondMov Extension Instructions
+    void TH_MVEQZ(GPR rd, GPR value, GPR condition) noexcept;
+    void TH_MVNEZ(GPR rd, GPR value, GPR condition) noexcept;
+
+    // XTheadBa Extension Instructions
+    void TH_ADDSL(GPR rd, GPR rs1, GPR rs2, uint32_t shift) noexcept;
 
     // Zicsr Extension Instructions
 
@@ -790,6 +859,17 @@ public:
     void PREFETCH_R(GPR rs, int32_t offset = 0) noexcept;
     void PREFETCH_W(GPR rs, int32_t offset = 0) noexcept;
 
+    // Control Flow Integrity Extension Instructions (Zicfiss and Zicfilp)
+
+    void SSAMOSWAP_D(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void SSAMOSWAP_W(Ordering ordering, GPR rd, GPR rs2, GPR rs1) noexcept;
+    void SSRDP(GPR rd) noexcept;
+    void SSPOPCHK(GPR rs2) noexcept;
+    void SSPUSH(GPR rs2) noexcept;
+    void C_SSPOPCHK() noexcept;
+    void C_SSPUSH() noexcept;
+    void LPAD(int32_t imm) noexcept;
+
     // Privileged Instructions
 
     void HFENCE_GVMA(GPR rs1, GPR rs2) noexcept;
@@ -810,6 +890,7 @@ public:
     void HSV_H(GPR rs2, GPR rs1) noexcept;
     void HSV_W(GPR rs2, GPR rs1) noexcept;
     void MRET() noexcept;
+    void SCTRCLR() noexcept;
     void SFENCE_INVAL_IR() noexcept;
     void SFENCE_VMA(GPR rs1, GPR rs2) noexcept;
     void SFENCE_W_INVAL() noexcept;
@@ -1207,6 +1288,9 @@ public:
     void VFSGNJX(Vec vd, Vec vs2, Vec vs1, VecMask mask = VecMask::No) noexcept;
     void VFSGNJX(Vec vd, Vec vs2, FPR rs1, VecMask mask = VecMask::No) noexcept;
 
+    void VFABS(Vec vd, Vec vs, VecMask mask = VecMask::No) noexcept;
+    void VFNEG(Vec vd, Vec vs, VecMask mask = VecMask::No) noexcept;
+
     void VFSQRT(Vec vd, Vec vs, VecMask mask = VecMask::No) noexcept;
     void VFRSQRT7(Vec vd, Vec vs, VecMask mask = VecMask::No) noexcept;
 
@@ -1467,6 +1551,44 @@ private:
     // branch offsets into the branch instructions that
     // requires them.
     void ResolveLabelOffsets(Label* label);
+
+    // Places a literal at the given offset.
+    template<typename T>
+    void PlaceAtOffset(Literal<T>* literal, Literal<T>::LocationOffset offset) {
+        BISCUIT_ASSERT(literal != nullptr);
+        BISCUIT_ASSERT(offset >= 0 && offset <= m_buffer.GetCursorOffset());
+
+        const T& value = literal->Place(offset);
+        ResolveLiteralOffsetsRaw(literal->m_location.value(), literal->m_offsets);
+        literal->ClearOffsets();
+
+        m_buffer.Emit(value);
+    }
+
+    // Links the given literal and returns the offset to it.
+    template<typename T>
+    ptrdiff_t LinkAndGetOffset(Literal<T>* literal) {
+        BISCUIT_ASSERT(literal != nullptr);
+
+        // If we have a placed literal, then it's straightforward to calculate
+        // the offsets.
+        if (literal->IsPlaced()) {
+            const auto cursor_address = m_buffer.GetCursorAddress();
+            const auto literal_offset = m_buffer.GetOffsetAddress(*literal->GetLocation());
+            return static_cast<ptrdiff_t>(literal_offset - cursor_address);
+        }
+
+        // If we don't have a placed literal, we return an offset of zero.
+        // While the emitter will emit a bogus load instruction initially,
+        // the offset will be patched over once the literal has been properly
+        // placed at a location.
+        literal->AddOffset(m_buffer.GetCursorOffset());
+        return 0;
+    }
+
+    // Resolves all literal offsets and patches any necessary
+    // offsets into the load instructions that require them.
+    void ResolveLiteralOffsetsRaw(ptrdiff_t location, const std::set<ptrdiff_t>& offsets);
 
     CodeBuffer m_buffer;
     ArchFeature m_features = ArchFeature::RV64;

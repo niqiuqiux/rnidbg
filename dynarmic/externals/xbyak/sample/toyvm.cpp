@@ -23,11 +23,14 @@
 	#pragma warning(disable:4514)
 	#pragma warning(disable:4786)
 #endif
+#ifdef __GNUC__
+	#pragma GCC diagnostic push
+	#pragma GCC diagnostic ignored "-Wmaybe-uninitialized" // wrong detection in recompile()
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <memory.h>
 #include <vector>
-#define XBYAK_NO_OP_NAMES
 #include "xbyak/xbyak.h"
 #include "xbyak/xbyak_util.h"
 #define NUM_OF_ARRAY(x) (sizeof(x) / sizeof(x[0]))

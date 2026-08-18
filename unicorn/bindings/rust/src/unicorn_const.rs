@@ -2,11 +2,11 @@
 use bitflags::bitflags;
 
 pub const API_MAJOR: u64 = 2;
-pub const API_MINOR: u64 = 0;
+pub const API_MINOR: u64 = 1;
 pub const VERSION_MAJOR: u64 = 2;
-pub const VERSION_MINOR: u64 = 0;
-pub const VERSION_PATCH: u64 = 0;
-pub const VERSION_EXTRA: u64 = 7;
+pub const VERSION_MINOR: u64 = 1;
+pub const VERSION_PATCH: u64 = 4;
+pub const VERSION_EXTRA: u64 = 255;
 pub const SECOND_SCALE: u64 = 1_000_000;
 pub const MILISECOND_SCALE: u64 = 1_000;
 

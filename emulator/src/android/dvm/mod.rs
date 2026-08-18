@@ -6,19 +6,13 @@ pub mod object;
 pub mod member;
 mod jni_env_ext;
 
-use std::cmp::{max, min};
-use std::{fs, mem};
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{Read, Seek};
 use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 use ansi_term::Color;
 use anyhow::anyhow;
-use bytes::{Buf, Bytes, BytesMut};
-use log::{error, info, warn};
+use log::{error, warn};
+use crate::backend::RegisterARM64;
 use sparse_list::SparseList;
 use crate::android::dvm::class::DvmClass;
 use crate::android::dvm::class_resolver::ClassResolver;
@@ -27,15 +21,9 @@ use crate::android::dvm::member::{DvmField, DvmMember, DvmMethod};
 use crate::android::dvm::object::DvmObject;
 use crate::android::jni;
 use crate::android::jni::{Jni, JNI_FLAG_CLASS, JNI_FLAG_REF, JNI_FLAG_OBJECT, VaList, MethodAcc};
-use crate::android::structs::JNINativeMethod;
-use crate::backend::RegisterARM64;
-use crate::elf::abi::PT_LOAD;
-use crate::elf::parser::ElfFile;
 use crate::emulator::{AndroidEmulator, RcUnsafeCell};
 use crate::linux::LinuxModule;
-use crate::memory::library_file::{ElfLibraryFile, LibraryFile};
 use crate::memory::svc_memory::{SimpleArm64Svc, SvcCallResult};
-use crate::pointer::VMPointer;
 use crate::tool::UnicornArg;
 
 pub(crate) const JNI_OK: i64 = 0;
@@ -68,6 +56,15 @@ fn NoImplementedHandler<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> 
     SvcCallResult::FUCK(anyhow!("Svc({}) No Implemented!", name))
 }
 
+fn AttachCurrentThread<T: Clone>(_name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
+    let env_pointer = emulator.backend.reg_read(RegisterARM64::X1).unwrap();
+    let env = dalvik!(emulator).java_env as i64;
+    if env_pointer != 0 {
+        let _ = emulator.backend.mem_write(env_pointer, &env.to_le_bytes());
+    }
+    SvcCallResult::RET(JNI_OK)
+}
+
 fn GetEnv<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
     let vm = emulator.backend.reg_read(RegisterARM64::X0).unwrap();
     let env_pointer = emulator.backend.reg_read(RegisterARM64::X1).unwrap();
@@ -77,8 +74,13 @@ fn GetEnv<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult 
         let dvm = dalvik!(emulator) as *mut DalvikVM64<T>;
         let env = (*dvm).java_env as i64;
         //let task = emulator.inner_mut().ctx_task;
-        if version as i64 != JNI_VERSION_1_6 {
-            panic!("Unsupported JNI version: 0x{:x}", version);
+        const JNI_VERSION_1_4: i64 = 0x00010004;
+        const JNI_VERSION_1_8: i64 = 0x00010008;
+        if version as i64 != JNI_VERSION_1_4
+            && version as i64 != JNI_VERSION_1_6
+            && version as i64 != JNI_VERSION_1_8
+        {
+            warn!("GetEnv: unusual JNI version 0x{:x}, still attaching 1.6", version);
         }
 
         if option_env!("PRINT_JNI_CALLS").unwrap_or("") == "1" {
@@ -101,7 +103,7 @@ impl<'a, T: Clone> DalvikVM64<'a, T> {
         // DestroyJavaVM
         let _destroy_java_vm = svc_memory.register_svc(SimpleArm64Svc::new("_DestroyJavaVM", NoImplementedHandler));
         // AttachCurrentThread
-        let _attach_current_thread = svc_memory.register_svc(SimpleArm64Svc::new("_AttachCurrentThread", NoImplementedHandler));
+        let _attach_current_thread = svc_memory.register_svc(SimpleArm64Svc::new("_AttachCurrentThread", AttachCurrentThread));
         // DetachCurrentThread
         let _detach_current_thread = svc_memory.register_svc(SimpleArm64Svc::new("_DetachCurrentThread", NoImplementedHandler));
         // GetEnv
@@ -137,17 +139,7 @@ impl<'a, T: Clone> DalvikVM64<'a, T> {
     }
 
     pub fn load_library(&self, emulator: AndroidEmulator<'a, T>, elf_file_path: &str, force_init: bool) -> anyhow::Result<RcUnsafeCell<LinuxModule<'a, T>>> {
-        let path = PathBuf::from(elf_file_path);
-        let file_data = fs::read(path)
-            .map_err(|e| anyhow!("unable to read elf file: {}", e))?;
-        let memory = &mut emulator.inner_mut().memory;
-        let library = memory.load_internal(LibraryFile::Elf(ElfLibraryFile::new(file_data, elf_file_path.to_string())), force_init, &emulator);
-
-        if std::env::var("RELEASE_CACHED_LIBRARIES").map_or(true, |v| v == "1") {
-            memory.release_cached_library();
-        }
-
-        library
+        emulator.load_library(elf_file_path, force_init)
     }
 
     pub fn call_jni_onload(&mut self, emulator: AndroidEmulator<'a, T>, module: &LinuxModule<T>) -> anyhow::Result<()> {
@@ -247,6 +239,12 @@ impl<'a, T: Clone> DalvikVM64<'a, T> {
         self.throwable = Option::from(throwable);
     }
 
+    pub fn throw_class(&mut self, name: &str) {
+        let class = self.resolve_class(name).unwrap().1;
+        let obj = class.new_simple_instance(self);
+        self.throw(obj);
+    }
+
     pub fn set_class_resolver(&mut self, rs: ClassResolver) {
         self.class_resolver = Option::from(rs);
     }
@@ -318,7 +316,14 @@ impl<'a, T: Clone> DalvikVM64<'a, T> {
         }
     }
 
-    pub fn resolve_class(&self, name: &str) -> Option<(i64, Rc<DvmClass>)> {
+    pub fn resolve_class(&mut self, name: &str) -> Option<(i64, Rc<DvmClass>)> {
+        if let Some(ref mut resolver) = self.class_resolver {
+            return Some(resolver.intern(name));
+        }
+        Some((-1, Rc::new(DvmClass::new_class(-1, name))))
+    }
+
+    pub fn resolve_class_lookup(&self, name: &str) -> Option<(i64, Rc<DvmClass>)> {
         if let Some(ref class_resolver) = self.class_resolver {
             class_resolver.find_class_by_name(name)
         } else {
@@ -371,5 +376,10 @@ impl<'a, T: Clone> AndroidEmulator<'a, T> {
         }
         DalvikVM64::init(self);
         self.inner_mut().dalvik.as_mut().unwrap()
+    }
+
+    /// Alias of `get_dalvik_vm`. JNI facade only — no Java bytecode.
+    pub fn create_jni_env(&self) -> &mut DalvikVM64<'a, T> {
+        self.get_dalvik_vm()
     }
 }

@@ -34,6 +34,8 @@ pub struct ElfDynamicStructure {
     android_rel_size: u32,
     android_rela_offset: i64,
     android_rel_offset: i64,
+    pub relr_offset: i64,
+    pub relr_size: u32,
     pub arm_ex_idx: i64,
 
     so_name: i32,
@@ -72,6 +74,8 @@ impl ElfDynamicStructure {
             android_rel_size: 0,
             android_rela_offset: 0,
             android_rel_offset: 0,
+            relr_offset: 0,
+            relr_size: 0,
             arm_ex_idx: 0,
 
             so_name: 0,
@@ -408,6 +412,22 @@ fn parse_dynamic_basic_info(dynamic_structure: &mut ElfDynamicStructure, parser:
             0x70000001 => {
                 dynamic_structure.arm_ex_idx = val;
             }
+            // DT_RELRSZ / DT_RELR (ELF gABI) — required by Android 10+ / API 36 bionic
+            35 => {
+                dynamic_structure.relr_size = val as u32;
+            }
+            36 => {
+                dynamic_structure.relr_offset = val;
+            }
+            37 => {}
+            // DT_ANDROID_RELR / DT_ANDROID_RELRSZ
+            0x6fffe000 => {
+                dynamic_structure.relr_offset = val;
+            }
+            0x6fffe001 => {
+                dynamic_structure.relr_size = val as u32;
+            }
+            0x6fffe003 => {}
             DT_VERSYM | DT_VERNEED | DT_VERNEEDNUM | DT_VERDEF | DT_VERDEFNUM => {}
             DT_RELACOUNT | DT_RELCOUNT | DT_FLAGS_1 | DT_AUXILIARY => {}
             _ => {

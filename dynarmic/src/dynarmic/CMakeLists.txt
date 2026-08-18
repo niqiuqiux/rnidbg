@@ -101,10 +101,6 @@ add_library(dynarmic
     ir/value.h
 )
 
-if (WIN32)
-    target_sources(dynarmic PRIVATE mman.c mman.h)
-endif()
-
 if ("A32" IN_LIST DYNARMIC_FRONTENDS)
     target_sources(dynarmic PRIVATE
         frontend/A32/a32_ir_emitter.cpp
@@ -273,6 +269,9 @@ if ("x86_64" IN_LIST ARCHITECTURE)
             xbyak::xbyak
             Zydis::Zydis
     )
+    # Newer versions of xbyak (>= 7.25.0) have stricter checks that currently
+    # fail in dynarmic
+    target_compile_definitions(dynarmic PRIVATE XBYAK_STRICT_CHECK_MEM_REG_SIZE=0)
 
     target_architecture_specific_sources(dynarmic "x86_64"
         backend/x64/abi.cpp
@@ -449,7 +448,7 @@ if ("riscv" IN_LIST ARCHITECTURE)
 endif()
 
 if (WIN32)
-    target_sources(dynarmic PRIVATE backend/exception_handler_windows.cpp)
+    target_sources(dynarmic PRIVATE backend/exception_handler_windows.cpp mman.c mman.h)
 elseif (APPLE)
     find_path(MACH_EXC_DEFS_DIR "mach/mach_exc.defs")
     if (NOT MACH_EXC_DEFS_DIR)
@@ -468,6 +467,7 @@ elseif (APPLE)
                 -server "${CMAKE_CURRENT_SOURCE_DIR}/backend/x64/mig/mach_exc_server.c"
                 -sheader "${CMAKE_CURRENT_SOURCE_DIR}/backend/x64/mig/mach_exc_server.h"
                 "${MACH_EXC_DEFS_DIR}/mach/mach_exc.defs"
+            COMMAND_ERROR_IS_FATAL ANY
         )
         execute_process(
             COMMAND
@@ -480,6 +480,7 @@ elseif (APPLE)
                 -server "${CMAKE_CURRENT_SOURCE_DIR}/backend/arm64/mig/mach_exc_server.c"
                 -sheader "${CMAKE_CURRENT_SOURCE_DIR}/backend/arm64/mig/mach_exc_server.h"
                 "${MACH_EXC_DEFS_DIR}/mach/mach_exc.defs"
+            COMMAND_ERROR_IS_FATAL ANY
         )
         target_sources(dynarmic PRIVATE
             backend/exception_handler_macos.cpp

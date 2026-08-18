@@ -103,10 +103,18 @@ pub struct AndroidFileSystem<T: Clone> {
 
 impl<T: Clone> AndroidFileSystem<T> {
     pub(crate) fn new() -> Self {
-        AndroidFileSystem {
+        let mut fs = AndroidFileSystem {
             fd_map: SparseList::new(),
-            file_resolver: None
-        }
+            file_resolver: None,
+        };
+        // Reserve POSIX stdio so the first openat cannot steal fd 0/1/2.
+        let stdin_fd = fs.insert_file(FileIO::Dynamic(Box::new(crate::linux::fs::stdio::StdinIO::new())));
+        let stdout_fd = fs.insert_file(FileIO::Dynamic(Box::new(crate::linux::fs::stdio::StdoutIO::stdout())));
+        let stderr_fd = fs.insert_file(FileIO::Dynamic(Box::new(crate::linux::fs::stdio::StdoutIO::stderr())));
+        debug_assert_eq!(stdin_fd, 0);
+        debug_assert_eq!(stdout_fd, 1);
+        debug_assert_eq!(stderr_fd, 2);
+        fs
     }
 
     pub(crate) fn insert_file(&mut self, file: FileIO<T>) -> i32 {
@@ -263,4 +271,22 @@ pub trait FileIOTrait<T: Clone> {
     fn len(&self) -> usize;
 
     fn to_vec(&mut self) -> Vec<u8>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdio_occupies_fd_012() {
+        let mut fs = AndroidFileSystem::<()>::new();
+        assert!(matches!(fs.get_file_mut(0), Some(FileIO::Dynamic(_))));
+        assert!(matches!(fs.get_file_mut(1), Some(FileIO::Dynamic(_))));
+        assert!(matches!(fs.get_file_mut(2), Some(FileIO::Dynamic(_))));
+        let next = {
+            let mut fs = AndroidFileSystem::<()>::new();
+            fs.insert_file(FileIO::Error(0))
+        };
+        assert_eq!(next, 3);
+    }
 }

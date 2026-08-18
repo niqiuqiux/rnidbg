@@ -1,17 +1,22 @@
-use std::collections::HashMap;
-use std::mem;
-use anyhow::{anyhow, Error};
-use bytes::{Buf, BufMut, BytesMut};
-use log::{debug, error, info};
-use crate::backend::RegisterARM64;
+use anyhow::anyhow;
+use bytes::{BufMut, BytesMut};
+use log::{debug, info, warn};
+use crate::android::sdk::ANDROID_SDK;
+use crate::backend::{Backend, Permission, RegisterARM64};
 use crate::emulator::{AndroidEmulator, POST_CALLBACK_SYSCALL_NUMBER, VMPointer};
 use crate::keystone;
-use crate::emulator::memory::MemoryBlockTrait;
 use crate::linux::errno::Errno;
-use crate::linux::PAGE_ALIGN;
 use crate::linux::structs::DlInfo;
 use crate::memory::svc_memory::{Arm64Svc, assemble_svc, HookListener, SvcMemory, SvcCallResult};
 use crate::memory::svc_memory::SvcCallResult::{FUCK, RET, VOID};
+
+/// Writable page for the virtual `libc_shared_globals` block.
+/// Device `ld-android.so` is a 4-byte `brk` stub; the real object lives in linker64
+/// (`__dl__ZZ21__libc_shared_globalsvE7globals`, 1760 bytes). libc preinit writes
+/// `tls_modules.generation` at +0x478, `generation_libc_so` at +0x480, and
+/// `set_target_sdk_version_hook` at +0x628.
+const LOADER_SHARED_GLOBALS_ADDR: u64 = 0xfffd0000;
+const LOADER_SHARED_GLOBALS_SIZE: usize = 0x1000;
 
 struct DlIteratePhdr;
 struct DlClose<'a, T: Clone>(pub VMPointer<'a, T>);
@@ -23,19 +28,84 @@ struct DlUnwindFindExidx;
 
 pub struct ArmLD64<'a, T: Clone> {
     error: VMPointer<'a, T>,
+    shared_globals: u64,
 }
 
-impl<T: Clone> ArmLD64<'_, T> {
-    pub fn new<'a>(svc_memory: &mut SvcMemory<'a, T>) -> anyhow::Result<ArmLD64<'a, T>> {
+impl<'a, T: Clone> ArmLD64<'a, T> {
+    pub fn new(
+        svc_memory: &mut SvcMemory<'a, T>,
+        backend: &Backend<'a, T>,
+    ) -> anyhow::Result<ArmLD64<'a, T>> {
+        backend
+            .mem_map(
+                LOADER_SHARED_GLOBALS_ADDR,
+                LOADER_SHARED_GLOBALS_SIZE,
+                (Permission::READ | Permission::WRITE).bits(),
+            )
+            .map_err(|e| anyhow!("map libc_shared_globals failed: {:?}", e))?;
+        // Low page: API 36 libc will ldrb through NULL+off if auxv/globals are unset.
+        // Keep it RW and zeroed so constructors fail soft instead of aborting the host.
+        // Cover NULL and unrelocated low addresses (IFUNC args, stray .rodata).
+        if backend
+            .mem_map(0, 0x10000, (Permission::READ | Permission::WRITE).bits())
+            .is_ok()
+        {
+            let _ = backend.mem_write(0, &[0u8; 0x1000]);
+        }
+        let shared = VMPointer::new(
+            LOADER_SHARED_GLOBALS_ADDR,
+            LOADER_SHARED_GLOBALS_SIZE,
+            backend.clone(),
+        );
+        shared.write_buf(vec![0u8; LOADER_SHARED_GLOBALS_SIZE])?;
+        populate_shared_globals(&shared)?;
+
         let pointer = svc_memory.allocate(0x80, "Dlfcn.error");
+        pointer.write_buf(vec![0u8; 0x80])?;
         Ok(ArmLD64 {
             error: pointer,
+            shared_globals: LOADER_SHARED_GLOBALS_ADDR,
         })
+    }
+
+    fn hook_loader(&self, emu: &AndroidEmulator<'a, T>, symbol_name: &str, old: u64) -> u64 {
+        info!("[ld-android] link {}, old=0x{:X}", symbol_name, old);
+        let svc = &mut emu.inner_mut().svc_memory;
+        match symbol_name {
+            "__loader_shared_globals" => svc.register_svc(Box::new(LoaderConst {
+                name: "LoaderSharedGlobals",
+                ret: self.shared_globals as i64,
+            })),
+            "__loader_android_get_application_target_sdk_version" => {
+                svc.register_svc(Box::new(LoaderConst {
+                    name: "LoaderGetTargetSdk",
+                    ret: ANDROID_SDK as i64,
+                }))
+            }
+            "__loader_dlopen" | "__loader_android_dlopen_ext" => {
+                svc.register_svc(Box::new(DlOpen(self.error.clone())))
+            }
+            "__loader_dlerror" => svc.register_svc(Box::new(DlError(self.error.clone()))),
+            "__loader_dlclose" => svc.register_svc(Box::new(DlClose(self.error.clone()))),
+            "__loader_dlsym" | "__loader_dlvsym" => svc.register_svc(Box::new(DlSym)),
+            "__loader_dladdr" => svc.register_svc(Box::new(DlAddr)),
+            "__loader_dl_iterate_phdr" => svc.register_svc(Box::new(DlIteratePhdr)),
+            _ => {
+                warn!("[ld-android] stub {} at 0x{:X} -> 0", symbol_name, old);
+                svc.register_svc(Box::new(LoaderConst {
+                    name: "LoaderStub",
+                    ret: 0,
+                }))
+            }
+        }
     }
 }
 
 impl<'a, T: Clone> HookListener<'a, T> for ArmLD64<'a, T> {
     fn hook(&self, emu: &AndroidEmulator<'a, T>, lib_name: String, symbol_name: String, old: u64) -> u64 {
+        if lib_name == "ld-android.so" || symbol_name.starts_with("__loader_") {
+            return self.hook_loader(emu, symbol_name.as_str(), old);
+        }
         if lib_name != "libdl.so" {
             return 0;
         }
@@ -47,10 +117,76 @@ impl<'a, T: Clone> HookListener<'a, T> for ArmLD64<'a, T> {
             "dlclose" => svc.register_svc(Box::new(DlClose(self.error.clone()))),
             "dlopen" => svc.register_svc(Box::new(DlOpen(self.error.clone()))),
             "dladdr" => svc.register_svc(Box::new(DlAddr)),
-            "dlsym" => svc.register_svc(Box::new(DlSym)),
+            "dlsym" | "dlvsym" => svc.register_svc(Box::new(DlSym)),
             "dl_unwind_find_exidx" => svc.register_svc(Box::new(DlUnwindFindExidx)),
-            _ => panic!("[libdl] symbol not found: {}", symbol_name)
+            "android_dlopen_ext" => svc.register_svc(Box::new(DlOpen(self.error.clone()))),
+            "android_get_application_target_sdk_version" => svc.register_svc(Box::new(LoaderConst {
+                name: "GetTargetSdk",
+                ret: ANDROID_SDK as i64,
+            })),
+            _ => {
+                info!("[libdl.so] leave {} at 0x{:X} unhooked", symbol_name, old);
+                0
+            }
         }
+    }
+}
+
+/// Layout of the in-page `libc_shared_globals` block (API 36 / Android 16).
+/// `getauxval` does `ldr x8, [globals, #0x418]; ldr x9, [x8]`.
+const OFF_AUXV: u64 = 0x418;
+const OFF_TLS_GENERATION: u64 = 0x478;
+const AUXV_TABLE_OFF: u64 = 0x800;
+const AT_RANDOM_OFF: u64 = 0x8c0;
+const AT_PLATFORM_OFF: u64 = 0x8d0;
+
+fn populate_shared_globals<T: Clone>(shared: &VMPointer<T>) -> anyhow::Result<()> {
+    let base = shared.addr;
+    // AT_RANDOM payload (16 bytes) and AT_PLATFORM string live in the same page.
+    shared.write_bytes_with_offset(AT_RANDOM_OFF, bytes::Bytes::from_static(&[
+        0xa5, 0x5a, 0x3c, 0xc3, 0x12, 0x34, 0x56, 0x78,
+        0x9a, 0xbc, 0xde, 0xf0, 0x0f, 0xed, 0xcb, 0xa9,
+    ]))?;
+    shared.share(AT_PLATFORM_OFF as i64).write_c_string("aarch64")?;
+
+    // Elf64_auxv_t[] used by getauxval.
+    let auxv = base + AUXV_TABLE_OFF;
+    const AT_PAGESZ: u64 = 6;
+    const AT_PLATFORM: u64 = 15;
+    const AT_HWCAP: u64 = 16;
+    const AT_RANDOM: u64 = 25;
+    const AT_SECURE: u64 = 23;
+    let entries: [(u64, u64); 6] = [
+        (AT_PAGESZ, 0x1000),
+        (AT_HWCAP, crate::android::sdk::GUEST_HWCAP),
+        (AT_SECURE, 0),
+        (AT_RANDOM, base + AT_RANDOM_OFF),
+        (AT_PLATFORM, base + AT_PLATFORM_OFF),
+        (0, 0),
+    ];
+    for (i, (ty, val)) in entries.iter().enumerate() {
+        let off = AUXV_TABLE_OFF + (i as u64) * 16;
+        shared.write_u64_with_offset(off, *ty)?;
+        shared.write_u64_with_offset(off + 8, *val)?;
+    }
+    shared.write_u64_with_offset(OFF_AUXV, auxv)?;
+    // tls_modules.generation starts at 1 so libc's copy is non-zero.
+    shared.write_u64_with_offset(OFF_TLS_GENERATION, 1)?;
+    Ok(())
+}
+
+struct LoaderConst {
+    name: &'static str,
+    ret: i64,
+}
+
+impl<T: Clone> Arm64Svc<T> for LoaderConst {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn handle(&self, _emu: &AndroidEmulator<T>) -> SvcCallResult {
+        RET(self.ret)
     }
 }
 
@@ -122,7 +258,12 @@ impl<T: Clone> Arm64Svc<T> for DlIteratePhdr {
         let mut modules = modules.iter().map(|module_cell| {
             let module = unsafe { &mut *module_cell.get() };
             let elf_file = unsafe { &*module.elf_file.as_ref().unwrap().get() };
-            (module.path(emu), module.virtual_base, elf_file.ph_offset, elf_file.num_ph)
+            (
+                module.path(emu),
+                module.base,
+                module.base + elf_file.ph_offset as u64,
+                elf_file.num_ph,
+            )
         }).collect::<Vec<_>>();
 
         modules.push(("/apex/com.android.art/lib64/libart.so".to_string(), 0, 0, 0));
@@ -191,8 +332,8 @@ impl<T: Clone> Arm64Svc<T> for DlError<'_, T> {
         "DlError"
     }
 
-    fn handle(&self, emu: &AndroidEmulator<T>) -> SvcCallResult {
-        panic!("dlerror not supported");
+    fn handle(&self, _emu: &AndroidEmulator<T>) -> SvcCallResult {
+        RET(self.0.addr as i64)
     }
 }
 
@@ -201,8 +342,8 @@ impl<T: Clone> Arm64Svc<T> for DlClose<'_, T> {
         "DlClose"
     }
 
-    fn handle(&self, emu: &AndroidEmulator<T>) -> SvcCallResult {
-        panic!("dlclose not supported")
+    fn handle(&self, _emu: &AndroidEmulator<T>) -> SvcCallResult {
+        RET(0)
     }
 }
 
@@ -260,20 +401,22 @@ impl<T: Clone> Arm64Svc<T> for DlOpen<'_, T> {
             }
         }
 
-        if file_name == "libnetd_client.so" {
+        if file_name == "libnetd_client.so" || file_name.ends_with("libnetd_client.so") {
             pointer.write_u64(0).unwrap(); // dlopen函数调用返回值
             let pointer = pointer.share_with_size(-8, 0);
             pointer.write_u64(0).unwrap();
-            if pointer.addr <= 0 {
-                panic!("dlopen failed");
-            }
             emu.backend.reg_write(RegisterARM64::SP, pointer.addr).unwrap();
             return RET(0)
-        } else {
-            panic!("dlopen not supported");
         }
 
-        FUCK(anyhow!("dlopen not supported"))
+        warn!("dlopen not implemented: {} flags=0x{:X}", file_name, flags);
+        let _ = self.0.write_c_string(&format!("dlopen failed: {}", file_name));
+        pointer.write_u64(0).unwrap();
+        let pointer = pointer.share_with_size(-8, 0);
+        pointer.write_u64(0).unwrap();
+        let _ = emu.set_errno(Errno::ENOENT.as_i32());
+        emu.backend.reg_write(RegisterARM64::SP, pointer.addr).unwrap();
+        RET(0)
     }
 }
 
@@ -351,7 +494,11 @@ impl<T: Clone> Arm64Svc<T> for DlSym {
     }
 
     fn handle(&self, emu: &AndroidEmulator<T>) -> SvcCallResult {
-        panic!("dlsym not supported")
+        let handle = emu.backend.reg_read(RegisterARM64::X0).unwrap_or(0);
+        let name_ptr = emu.backend.reg_read(RegisterARM64::X1).unwrap_or(0);
+        let name = emu.backend.mem_read_c_string(name_ptr).unwrap_or_default();
+        warn!("dlsym not implemented: handle=0x{:X} name={}", handle, name);
+        RET(0)
     }
 }
 
@@ -360,7 +507,7 @@ impl<T: Clone> Arm64Svc<T> for DlUnwindFindExidx {
         "DlUnwindFindExidx"
     }
 
-    fn handle(&self, emu: &AndroidEmulator<T>) -> SvcCallResult {
-        panic!("DlUnwindFindExidx not supported")
+    fn handle(&self, _emu: &AndroidEmulator<T>) -> SvcCallResult {
+        RET(0)
     }
 }

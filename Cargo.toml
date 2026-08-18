@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "emulator", "sparse_list", "dynarmic"]
+resolver = "2"
+
 [package]
 name = "rnidbg"
 authors = ["fuqiuluo"]

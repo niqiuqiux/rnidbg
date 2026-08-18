@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::rc::Rc;
-use crate::android::dvm::class::DvmClass;
+use crate::android::dvm::class::{format_class_name, DvmClass};
 use crate::android::jni::{generate_class_id};
 
 pub struct ClassResolver {
     class_map: HashMap<i64, Rc<DvmClass>>,
+    next_seq: i32,
 }
 
 impl ClassResolver {
@@ -81,7 +82,21 @@ impl ClassResolver {
         }
         ClassResolver {
             class_map: map,
+            next_seq: seq,
         }
+    }
+
+    /// Create a class handle if it was not pre-registered.
+    pub fn intern(&mut self, name: &str) -> (i64, Rc<DvmClass>) {
+        let name = format_class_name(name);
+        if let Some(found) = self.find_class_by_name(&name) {
+            return found;
+        }
+        let id = generate_class_id(self.next_seq);
+        self.next_seq += 1;
+        let class = Rc::new(DvmClass::new_class(id, &name));
+        self.class_map.insert(id, class.clone());
+        (id, class)
     }
 
     /*/// I don't recommend this method at all!

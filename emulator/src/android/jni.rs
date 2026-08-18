@@ -214,6 +214,56 @@ impl<'a, T: Clone> VaList<'a, T> {
             backend: emulator.backend.clone(),
         }
     }
+
+    /// Build a va_list from AAPCS64 registers after `named` GPRs (CallXxxMethod).
+    pub(crate) fn from_reg_varargs(emulator: &AndroidEmulator<'a, T>, named: u32) -> VaList<'a, T> {
+        let n = 8u32.saturating_sub(named);
+        let gr_size = (n as usize) * 8;
+        let mem = emulator.falloc(gr_size.max(8), true).expect("jni reg va_list");
+        for i in 0..n {
+            let reg = unsafe { std::mem::transmute::<u32, crate::backend::RegisterARM64>(199 + named + i) };
+            let val = emulator.backend.reg_read(reg).unwrap_or(0);
+            let _ = mem.write_u64_with_offset((i as u64) * 8, val);
+        }
+        let sp = emulator.backend.reg_read(crate::backend::RegisterARM64::SP).unwrap_or(0);
+        VaList {
+            stack: sp,
+            gr_top: mem.addr + gr_size as u64,
+            vr_top: mem.addr,
+            gr_offs: -(gr_size as i32),
+            vr_offs: 0,
+            backend: emulator.backend.clone(),
+        }
+    }
+
+    /// Treat a `jvalue*` as an 8-byte-slot stack-only va_list (CallXxxMethodA).
+    pub(crate) fn from_jvalues(emulator: &AndroidEmulator<'a, T>, jvalues: u64) -> VaList<'a, T> {
+        VaList {
+            stack: jvalues,
+            gr_top: jvalues,
+            vr_top: 0,
+            gr_offs: 0,
+            vr_offs: 0,
+            backend: emulator.backend.clone(),
+        }
+    }
+
+    pub(crate) fn from_jni_style(
+        emulator: &AndroidEmulator<'a, T>,
+        name: &str,
+        named: u32,
+        list_reg: crate::backend::RegisterARM64,
+    ) -> VaList<'a, T> {
+        if name.ends_with('A') {
+            let ptr = emulator.backend.reg_read(list_reg).unwrap_or(0);
+            Self::from_jvalues(emulator, ptr)
+        } else if name.ends_with('V') {
+            let ptr = emulator.backend.reg_read(list_reg).unwrap_or(0);
+            Self::new(emulator, ptr)
+        } else {
+            Self::from_reg_varargs(emulator, named)
+        }
+    }
 }
 
 impl<T: Clone> VaPrimitive<T> for DvmObject {

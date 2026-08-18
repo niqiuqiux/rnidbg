@@ -126,9 +126,11 @@ pub struct DlInfo {
 #[repr(C)]
 #[derive(Clone)]
 pub struct PropInfo {
-    pub name: [u8; 32],
+    /// bionic: `serial` then `value[PROP_VALUE_MAX]`, name immediately after.
+    /// High byte of `serial` is `strlen(value)`.
     pub serial: u32,
     pub value: [u8; 92],
+    pub name: [u8; 96],
 }
 
 pub mod thread {}
@@ -286,23 +288,35 @@ pub struct CVaList<'a, T: Clone> {
 
 impl<T: Clone> CVaList<'_, T> {
     pub(crate) unsafe fn get_gr<D>(&mut self) -> D {
-        let pointer = (self.gr_top as usize - self.gr_offs.abs() as usize) as u64;
+        let pointer = if self.gr_offs >= 0 {
+            let p = self.stack;
+            self.stack += 8;
+            p
+        } else {
+            let p = (self.gr_top as usize - self.gr_offs.unsigned_abs() as usize) as u64;
+            self.gr_offs += 8;
+            p
+        };
         let size = size_of::<D>();
-        let rv = self.backend.mem_read_as_vec(pointer, size).unwrap();
-        self.gr_offs += 8;
+        let rv = self.backend.mem_read_as_vec(pointer, size).unwrap_or_else(|_| vec![0u8; size]);
         let rv = rv.as_slice().as_ptr() as *const D;
-        let rv = ptr::read(rv);
-        rv
+        ptr::read(rv)
     }
 
     pub(crate) unsafe fn get_vr<D>(&mut self) -> D {
-        let pointer = (self.vr_top as usize - self.vr_offs.abs() as usize) as u64;
-        self.vr_offs += 16;
+        let pointer = if self.vr_offs >= 0 {
+            let p = self.stack;
+            self.stack += 8;
+            p
+        } else {
+            let p = (self.vr_top as usize - self.vr_offs.unsigned_abs() as usize) as u64;
+            self.vr_offs += 16;
+            p
+        };
         let size = size_of::<D>();
-        let rv = self.backend.mem_read_as_vec(pointer, size).unwrap();
+        let rv = self.backend.mem_read_as_vec(pointer, size).unwrap_or_else(|_| vec![0u8; size]);
         let rv = rv.as_slice().as_ptr() as *const D;
-        let rv = ptr::read(rv);
-        rv
+        ptr::read(rv)
     }
 }
 

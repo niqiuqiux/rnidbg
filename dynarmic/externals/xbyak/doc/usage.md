@@ -1,7 +1,7 @@
 # Usage
 
-Inherit `Xbyak::CodeGenerator` class and make the class method.
-```
+Inherit the `Xbyak::CodeGenerator` class and define a class method.
+```cpp
 #include <xbyak/xbyak.h>
 
 struct Code : Xbyak::CodeGenerator {
@@ -12,8 +12,8 @@ struct Code : Xbyak::CodeGenerator {
     }
 };
 ```
-Or you can pass the instance of CodeGenerator without inheriting.
-```
+Alternatively, you can pass an instance of `CodeGenerator` without inheriting.
+```cpp
 void genCode(Xbyak::CodeGenerator& code, int x) {
     using namespace Xbyak::util;
     code.mov(eax, x);
@@ -21,18 +21,19 @@ void genCode(Xbyak::CodeGenerator& code, int x) {
 }
 ```
 
-Make an instance of the class and get the function
-pointer by calling `getCode()` and call it.
-```
+Create an instance of the class, obtain the function pointer by calling `getCode()`, and invoke it.
+```cpp
 Code c(5);
 int (*f)() = c.getCode<int (*)()>();
 printf("ret=%d\n", f()); // ret = 5
 ```
 
-## Syntax
-Similar to MASM/NASM syntax with parentheses.
+**Note**: For security considerations and memory protection modes, see the [Read/Exec mode](#readexec-mode) section.
 
-```
+## Syntax
+The syntax is similar to MASM/NASM, but uses parentheses for function-like expressions.
+
+```cpp
 NASM              Xbyak
 mov eax, ebx  --> mov(eax, ebx);
 inc ecx           inc(ecx);
@@ -40,10 +41,9 @@ ret           --> ret();
 ```
 
 ## Addressing
-Use `qword`, `dword`, `word` and `byte` if it is necessary to specify the size of memory,
-otherwise use `ptr`.
+Use `qword`, `dword`, `word`, or `byte` to specify the memory size explicitly. If the size is not specified, `ptr` is used by default.
 
-```
+```cpp
 (ptr|qword|dword|word|byte) [base + index * (1|2|4|8) + displacement]
                             [rip + 32bit disp] ; x64 only
 
@@ -53,34 +53,36 @@ mov al, [ebx+ecx]  --> mov(al, ptr [ebx + ecx]);
 test byte [esp], 4 --> test(byte [esp], 4);
 inc qword [rax]    --> inc(qword [rax]);
 ```
+
 **Note**: `qword`, ... are member variables, then don't use `dword` as unsigned int type.
 
 ### How to use Selector (Segment Register)
-```
+```cpp
 mov eax, [fs:eax] --> putSeg(fs);
                       mov(eax, ptr [eax]);
 mov ax, cs        --> mov(ax, cs);
 ```
+
 **Note**: Segment class is not derived from `Operand`.
 
 ## AVX
 
-```
+```cpp
 vaddps(xmm1, xmm2, xmm3); // xmm1 <- xmm2 + xmm3
 vaddps(xmm2, xmm3, ptr [rax]); // use ptr to access memory
 vgatherdpd(xmm1, ptr [ebp + 256 + xmm2*4], xmm3);
 ```
 
 **Note**:
-If `XBYAK_ENABLE_OMITTED_OPERAND` is defined, then you can use two operand version for backward compatibility.
+If `XBYAK_ENABLE_OMITTED_OPERAND` is defined, you can use the two-operand version for backward compatibility.
 But the newer version will not support it.
-```
+```cpp
 vaddps(xmm2, xmm3); // xmm2 <- xmm2 + xmm3
 ```
 
 ## AVX-512
 
-```
+```cpp
 vaddpd zmm2, zmm5, zmm30                --> vaddpd(zmm2, zmm5, zmm30);
 vaddpd xmm30, xmm20, [rax]              --> vaddpd(xmm30, xmm20, ptr [rax]);
 vaddps xmm30, xmm20, [rax]              --> vaddps(xmm30, xmm20, ptr [rax]);
@@ -106,18 +108,7 @@ vcvtpd2dq xmm19, [eax+32]{1to4}         --> vcvtpd2dq(xmm19, yword_b [eax+32]); 
 vfpclassps k5{k3}, zword [rax+64], 5    --> vfpclassps(k5|k3, zword [rax+64], 5); // specify m512
 vfpclasspd k5{k3}, [rax+64]{1to2}, 5    --> vfpclasspd(k5|k3, xword_b [rax+64], 5); // broadcast 64-bit to 128-bit
 vfpclassps k5{k3}, [rax+64]{1to4}, 5    --> vfpclassps(k5|k3, yword_b [rax+64], 5); // broadcast 64-bit to 256-bit
-
-vpdpbusd(xm0, xm1, xm2); // default encoding is EVEX
-vpdpbusd(xm0, xm1, xm2, EvexEncoding); // same as the above
-vpdpbusd(xm0, xm1, xm2, VexEncoding); // VEX encoding
-setDefaultEncoding(VexEncoding); // default encoding is VEX
-vpdpbusd(xm0, xm1, xm2); // VEX encoding
 ```
-
-- setDefaultEncoding(PreferredEncoding encoding);
-  - Set the default encoding to select EVEX or VEX.
-  - The default value is EvexEncoding.
-  - This function affects only an instruction that has a PreferredEncoding argument such as vpdpbusd.
 
 ### Remark
 * `k1`, ..., `k7` are opmask registers.
@@ -127,6 +118,53 @@ vpdpbusd(xm0, xm1, xm2); // VEX encoding
 * `k4 | k3` is different from `k3 | k4`.
 * use `ptr_b` for broadcast `{1toX}`. X is automatically determined.
 * specify `xword`/`yword`/`zword(_b)` for m128/m256/m512 if necessary.
+
+## Selecting AVX512-VNNI, AVX-VNNI, AVX-VNNI-INT8, AVX10.2.
+Some mnemonics have some types of encodings: VEX, EVEX, AVX10.2.
+The functions for these mnemonics include an optional parameter as the last argument to specify the encoding.
+The default behavior depends on the order in which the instruction was introduced (whether VEX, EVEX or AVX10.2 came first),
+and can be specified using setDefaultEncoding.
+
+```cpp
+vpdpbusd(xm0, xm1, xm2); // default encoding: EVEX (AVX512-VNNI)
+vpdpbusd(xm0, xm1, xm2, EvexEncoding); // same as the above
+vpdpbusd(xm0, xm1, xm2, VexEncoding); // VEX (AVX-VNNI)
+setDefaultEncoding(VexEncoding); // change default encoding
+vpdpbusd(xm0, xm1, xm2); // VEX
+
+vmpsadbw(xm1, xm3, xm15, 3); // default encoding: AVX
+vmpsadbw(xm1, xm3, xm15, 3, PreAVX10v2Encoding); // same as the above
+vmpsadbw(xm1, xm3, xm15, 3, AVX10v2Encoding); // AVX10.2
+setDefaultEncodingAVX10(AVX10v2Encoding); // change default encoding
+vmpsadbw(xm1, xm3, xm15, 3); // AVX10.2
+```
+
+- `setDefaultEncoding(PreferredEncoding enc = EvexEncoding)`
+  - Configure encoding for AVX512-VNNI or AVX-VNNI instructions.
+- `setDefaultEncodingAVX10(PreferredEncoding enc = PreAVXv2Encoding)`
+  - Configure encoding for pre-AVX10.2 and AVX10.2 instructions.
+
+`setDefaultEncoding`|EvexEncoding (default)|VexEncoding
+-|-|-
+feature|AVX512-VNNI|AVX-VNNI
+
+- Target functions: vpdpbusd, vpdpbusds, vpdpwssd, vpdpwssds
+
+`setDefaultEncodingAVX10`|PreAVX10v2Encoding (default)|AVX10v2Encoding
+-|-|-
+feature|AVX-VNNI-INT8, AVX512-FP16|AVX10.2
+
+- Target functions: vmpsadbw, vpdpbssd, vpdpbssds, vpdpbsud, vpdpbsuds, vpdpbuud, vpdpbuuds, vpdpwsud vpdpwsuds vpdpwusd vpdpwusds vpdpwuud, vpdpwuuds and vmovd, vmovw with MEM-to-MEM.
+
+### Remark
+
+1. `vmovd` and `vmovw` instructions with REG-to-XMM or XMM-to-REG operands are always encoded using AVX10.1.
+When used with XMM-to-XMM operands, these instructions are always encoded using AVX10.2.
+
+2. `vmovd` and `vmovw` instructions with XMM-to-MEM or MEM-to-XMM operands support multiple encoding formats, including AVX, AVX512F, AVX512-FP16, and AVX10.2.
+
+Initially, I tried implementing `setDefaultEncodingAVX10` using `EvexEncoding` (resp. `VexEncoding`) instead of `AVX10v2Encoding` (resp. `EvexEncoding`).
+However, I abandoned this approach after discovering the complexity of the encoding requirements of `vmovd` and `vmovw`.
 
 ## APX
 [Advanced Performance Extensions (APX) Architecture Specification](https://www.intel.com/content/www/us/en/content-details/786223/intel-advanced-performance-extensions-intel-apx-architecture-specification.html)
@@ -157,10 +195,10 @@ vpdpbusd(xm0, xm1, xm2); // VEX encoding
 
 
 ## Label
-Two kinds of Label are supported. (String literal and Label class).
+Two types of labels are supported: string literals and the `Label` class.
 
 ### String literal
-```
+```cpp
 L("L1");
   jmp("L1");
 
@@ -182,7 +220,7 @@ L("L3");
 
 ### Support `@@`, `@f`, `@b` like MASM
 
-```
+```cpp
 L("@@"); // <A>
   jmp("@b"); // jmp to <A>
   jmp("@f"); // jmp to <B>
@@ -198,7 +236,7 @@ Label symbols beginning with a period between `inLocalLabel()` and `outLocalLabe
 are treated as a local label.
 `inLocalLabel()` and `outLocalLabel()` can be nested.
 
-```
+```cpp
 void func1()
 {
     inLocalLabel();
@@ -221,7 +259,7 @@ void func1()
 Xbyak deals with jump mnemonics of an undefined label as short jump if no type is specified.
 So if the size between jmp and label is larger than 127 byte, then xbyak will cause an error.
 
-```
+```cpp
 jmp("short-jmp"); // short jmp
 // small code
 L("short-jmp");
@@ -230,14 +268,16 @@ jmp("long-jmp");
 // long code
 L("long-jmp"); // throw exception
 ```
+
 Then specify T_NEAR for jmp.
-```
+```cpp
 jmp("long-jmp", T_NEAR); // long jmp
 // long code
 L("long-jmp");
 ```
+
 Or call `setDefaultJmpNEAR(true);` once, then the default type is set to T_NEAR.
-```
+```cpp
 jmp("long-jmp"); // long jmp
 // long code
 L("long-jmp");
@@ -247,7 +287,7 @@ L("long-jmp");
 
 `L()` and `jxx()` support Label class.
 
-```
+```cpp
   Xbyak::Label label1, label2;
 L(label1);
   ...
@@ -259,7 +299,7 @@ L(label2);
 ```
 
 Use `putL` for jmp table
-```
+```cpp
     Label labelTbl, L0, L1, L2;
     mov(rax, labelTbl);
     // rdx is an index of jump table
@@ -276,7 +316,7 @@ L(L1);
 
 `assignL(dstLabel, srcLabel)` binds dstLabel with srcLabel.
 
-```
+```cpp
   Label label2;
   Label label1 = L(); // make label1 ; same to Label label1; L(label1);
   ...
@@ -291,7 +331,7 @@ The `jmp` in the above code jumps to label1 assigned by `assignL`.
 * dstLabel must not be used in `L()`.
 
 `Label::getAddress()` returns the address specified by the label instance and 0 if not specified.
-```
+```cpp
 // not AutoGrow mode
 Label  label;
 assert(label.getAddress() == 0);
@@ -300,7 +340,7 @@ assert(label.getAddress() == getCurr());
 ```
 
 ### Rip ; relative addressing
-```
+```cpp
 Label label;
 mov(eax, ptr [rip + label]); // eax = 4
 ...
@@ -308,24 +348,42 @@ mov(eax, ptr [rip + label]); // eax = 4
 L(label);
 dd(4);
 ```
-```
+```cpp
 int x;
 ...
   mov(eax, ptr[rip + &x]); // throw exception if the difference between &x and current position is larger than 2GiB
 ```
+
+### Addressing with Label
+The Label class can be used for addressing displacement.
+However, in 64-bit mode, `dataL.getAddress()` must be 2GiB or less.
+
+```cpp
+Label dataL;
+
+  mov(eax, ptr[dataL+ecx*4]);
+  ...
+L(dataL);
+  for (int i = 0; i < 10; i++) {
+    dd(i);
+  }
+  ...
+```
+
+Only the form `mov((al|ax|eax|rax), ptr[label])` can be used even if the label exceeds 2GiB.
 
 ## Far jump
 
 Use `word|dword|qword` instead of `ptr` to specify the address size.
 
 ### 32 bit mode
-```
+```cpp
 jmp(word[eax], T_FAR);  // jmp m16:16(FF /5)
 jmp(dword[eax], T_FAR); // jmp m16:32(FF /5)
 ```
 
 ### 64 bit mode
-```
+```cpp
 jmp(word[rax], T_FAR);  // jmp m16:16(FF /5)
 jmp(dword[rax], T_FAR); // jmp m16:32(FF /5)
 jmp(qword[rax], T_FAR); // jmp m16:64(REX.W FF /5)
@@ -334,9 +392,9 @@ The same applies to `call`.
 
 ## Code size
 The default max code size is 4096 bytes.
-Specify the size in constructor of `CodeGenerator()` if necessary.
+Specify the size in the constructor of `CodeGenerator()` if needed.
 
-```
+```cpp
 class Quantize : public Xbyak::CodeGenerator {
 public:
   Quantize()
@@ -353,7 +411,7 @@ You can make jit code on prepared memory.
 
 Call `setProtectModeRE` yourself to change memory mode if using the prepared memory.
 
-```
+```cpp
 uint8_t alignas(4096) buf[8192]; // C++11 or later
 
 struct Code : Xbyak::CodeGenerator {
@@ -379,7 +437,7 @@ int main()
 The memory region for jit is automatically extended if necessary when `AutoGrow` is specified in a constructor of `CodeGenerator`.
 
 Call `ready()` or `readyRE()` before calling `getCode()` to fix jump address.
-```
+```cpp
 struct Code : Xbyak::CodeGenerator {
   Code()
     : Xbyak::CodeGenerator(<default memory size>, Xbyak::AutoGrow)
@@ -400,7 +458,7 @@ Xbyak set Read/Write/Exec mode to memory to run jit code.
 If you want to use Read/Exec mode for security, then specify `DontSetProtectRWE` for `CodeGenerator` and
 call `setProtectModeRE()` after generating jit code.
 
-```
+```cpp
 struct Code : Xbyak::CodeGenerator {
     Code()
         : Xbyak::CodeGenerator(4096, Xbyak::DontSetProtectRWE)

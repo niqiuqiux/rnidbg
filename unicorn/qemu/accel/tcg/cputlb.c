@@ -661,6 +661,25 @@ static void tlb_reset_dirty_range_locked(struct uc_struct *uc, CPUTLBEntry *tlb_
     }
 }
 
+static void tlb_reset_dirty_range_by_vaddr_locked(struct uc_struct *uc, CPUTLBEntry *tlb_entry,
+                                                  target_ulong start, target_ulong length)
+{
+    uintptr_t addr = tlb_entry->addr_write;
+
+    if ((addr & (TLB_INVALID_MASK | TLB_MMIO |
+                 TLB_DISCARD_WRITE | TLB_NOTDIRTY)) == 0) {
+        addr &= TARGET_PAGE_MASK;
+        if ((addr - start) < length) {
+#if TCG_OVERSIZED_GUEST
+            tlb_entry->addr_write |= TLB_NOTDIRTY;
+#else
+            tlb_entry->addr_write = tlb_entry->addr_write | TLB_NOTDIRTY;
+#endif
+        }
+    }
+}
+
+
 /*
  * Called with tlb_c.lock held.
  * Called only from the vCPU context, i.e. the TLB's owner thread.
@@ -695,6 +714,30 @@ void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length)
         for (i = 0; i < CPU_VTLB_SIZE; i++) {
             tlb_reset_dirty_range_locked(uc, &env_tlb(env)->d[mmu_idx].vtable[i],
                                          start1, length);
+        }
+    }
+}
+
+void tlb_reset_dirty_by_vaddr(CPUState *cpu, target_ulong start1, target_ulong length)
+{
+    struct uc_struct *uc = cpu->uc;
+    CPUArchState *env;
+
+    int mmu_idx;
+
+    env = cpu->env_ptr;
+    for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+        unsigned int i;
+        unsigned int n = tlb_n_entries(&env_tlb(env)->f[mmu_idx]);
+
+        for (i = 0; i < n; i++) {
+            tlb_reset_dirty_range_by_vaddr_locked(uc, &env_tlb(env)->f[mmu_idx].table[i],
+                                                  start1, length);
+        }
+
+        for (i = 0; i < CPU_VTLB_SIZE; i++) {
+            tlb_reset_dirty_range_by_vaddr_locked(uc, &env_tlb(env)->d[mmu_idx].vtable[i],
+                                                  start1, length);
         }
     }
 }
@@ -1144,28 +1187,30 @@ tb_page_addr_t get_page_addr_code(CPUArchState *env, target_ulong addr)
 }
 
 static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
-                           CPUIOTLBEntry *iotlbentry, uintptr_t retaddr)
+                           CPUIOTLBEntry *iotlbentry, uintptr_t retaddr,
+                           CPUTLBEntry *tlbe)
 {
+#ifdef TARGET_ARM
+    struct uc_struct *uc = cpu->uc;
+#endif
     ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
+    MemoryRegion *mr = cpu->uc->memory_mapping(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
 
-    // trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
-
-    if (!cpu_physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
+    if (mr && (mr->perms & UC_PROT_EXEC) != 0) {
         struct page_collection *pages
             = page_collection_lock(cpu->uc, ram_addr, ram_addr + size);
         tb_invalidate_phys_page_fast(cpu->uc, pages, ram_addr, size, retaddr);
         page_collection_unlock(pages);
     }
 
-    /*
-     * Set both VGA and migration bits for simplicity and to remove
-     * the notdirty callback faster.
-     */
-    cpu_physical_memory_set_dirty_range(ram_addr, size, DIRTY_CLIENTS_NOCODE);
-
-    /* We remove the notdirty callback only if the code has been flushed. */
-    if (!cpu_physical_memory_is_clean(ram_addr)) {
-        // trace_memory_notdirty_set_dirty(mem_vaddr);
+    /* For exec pages, this is cleared in tb_gen_code. */
+    // If we:
+    // - have memory hooks installed
+    // - or doing snapshot
+    // , then never clean the tlb
+    if (!(!mr || (tlbe->addr_write != -1 && mr->priority < cpu->uc->snapshot_level)) &&
+            !(tlbe->addr_code != -1) &&
+            !uc_mem_hook_installed(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK))) {
         tlb_set_dirty(cpu, mem_vaddr);
     }
 }
@@ -1244,11 +1289,58 @@ void *probe_access(CPUArchState *env, target_ulong addr, int size,
 
         /* Handle clean RAM pages.  */
         if (tlb_addr & TLB_NOTDIRTY) {
-            notdirty_write(env_cpu(env), addr, size, iotlbentry, retaddr);
+            notdirty_write(env_cpu(env), addr, size, iotlbentry, retaddr, entry);
         }
     }
 
     return (void *)((uintptr_t)addr + entry->addend);
+}
+
+bool tlb_vaddr_to_paddr(CPUArchState *env, abi_ptr addr,
+                        MMUAccessType access_type, int mmu_idx, target_ulong *paddr)
+{
+    struct uc_struct *uc = env->uc;
+    CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
+    target_ulong tlb_addr, page;
+    size_t elt_ofs = 0;
+
+    switch (access_type) {
+    case MMU_DATA_LOAD:
+        elt_ofs = offsetof(CPUTLBEntry, addr_read);
+        break;
+    case MMU_DATA_STORE:
+        elt_ofs = offsetof(CPUTLBEntry, addr_write);
+        break;
+    case MMU_INST_FETCH:
+        elt_ofs = offsetof(CPUTLBEntry, addr_code);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    page = addr & TARGET_PAGE_MASK;
+    tlb_addr = tlb_read_ofs(entry, elt_ofs);
+
+    if (!tlb_hit_page(uc, tlb_addr, page)) {
+        uintptr_t index = tlb_index(env, mmu_idx, addr);
+
+        if (!victim_tlb_hit(env, mmu_idx, index, elt_ofs, page)) {
+            CPUState *cs = env_cpu(env);
+            CPUClass *cc = CPU_GET_CLASS(cs);
+
+            if (!cc->tlb_fill(cs, addr, 0, access_type, mmu_idx, true, 0)) {
+                /* Non-faulting page table read failed.  */
+                return false;
+            }
+
+            /* TLB resize via tlb_fill may have moved the entry.  */
+            entry = tlb_entry(env, mmu_idx, addr);
+        }
+        tlb_addr = tlb_read_ofs(entry, elt_ofs);
+    }
+
+    *paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
+    return true;
 }
 
 void *tlb_vaddr_to_host(CPUArchState *env, abi_ptr addr,
@@ -1370,7 +1462,7 @@ static void *atomic_mmu_lookup(CPUArchState *env, target_ulong addr,
 
     if (unlikely(tlb_addr & TLB_NOTDIRTY)) {
         notdirty_write(env_cpu(env), addr, 1 << s_bits,
-                       &env_tlb(env)->d[mmu_idx].iotlb[index], retaddr);
+                       &env_tlb(env)->d[mmu_idx].iotlb[index], retaddr, tlbe);
     }
 
     return hostaddr;
@@ -1424,7 +1516,7 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
     uintptr_t index = tlb_index(env, mmu_idx, addr);
     CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
     target_ulong tlb_addr = code_read ? entry->addr_code : entry->addr_read;
-    target_ulong paddr;
+    hwaddr paddr;
     const size_t tlb_off = code_read ?
         offsetof(CPUTLBEntry, addr_code) : offsetof(CPUTLBEntry, addr_read);
     const MMUAccessType access_type =
@@ -1439,6 +1531,7 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
     HOOK_FOREACH_VAR_DECLARE;
     struct uc_struct *uc = env->uc;
     MemoryRegion *mr;
+    bool synced = false;
 
     /* Handle CPU specific unaligned behaviour */
     if (addr & ((1 << a_bits) - 1)) {
@@ -1468,13 +1561,17 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
         // if there is already an unhandled eror, skip callbacks.
         if (uc->invalid_error == UC_ERR_OK) {
             if (code_read) {
-                // code fetching
+                // code fetching  
                 error_code = UC_ERR_FETCH_UNMAPPED;
                 HOOK_FOREACH(uc, hook, UC_HOOK_MEM_FETCH_UNMAPPED) {
                     if (hook->to_delete)
                         continue;
                     if (!HOOK_BOUND_CHECK(hook, paddr))
                         continue;
+                    if (!synced && !uc->skip_sync_pc_on_exit && retaddr) {
+                        cpu_restore_state(uc->cpu, retaddr, false);
+                        synced = true;
+                    }
                     JIT_CALLBACK_GUARD_VAR(handled,
                                            ((uc_cb_eventmem_t)hook->callback)(uc, UC_MEM_FETCH_UNMAPPED, paddr, size, 0, hook->user_data));
                     if (handled)
@@ -1492,6 +1589,10 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
                         continue;
                     if (!HOOK_BOUND_CHECK(hook, paddr))
                         continue;
+                    if (!synced &&!uc->skip_sync_pc_on_exit && retaddr) {
+                        cpu_restore_state(uc->cpu, retaddr, false);
+                        synced = true;
+                    }
                     JIT_CALLBACK_GUARD_VAR(handled, 
                                            ((uc_cb_eventmem_t)hook->callback)(uc, UC_MEM_READ_UNMAPPED, paddr, size, 0, hook->user_data));
                     if (handled)
@@ -1530,7 +1631,7 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
                     //                because qemu might generate tcg code like:
                     //                       qemu_ld_i64 x0,x1,leq,8  sync: 0  dead: 0 1
                     //                where we don't have a change to recover x0 value
-                    cpu_loop_exit(uc->cpu);
+                    cpu_loop_exit_restore(uc->cpu, retaddr);
                 }
                 return 0;
             }
@@ -1541,25 +1642,43 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
             if (uc->nested_level > 0 && !uc->cpu->stopped) {
                 cpu_exit(uc->cpu);
                 // See comments above
-                cpu_loop_exit(uc->cpu);
+                cpu_loop_exit_restore(uc->cpu, retaddr);
             }
             return 0;
         }
     }
 
     // now it is read on mapped memory
-    if (!code_read) {
+    // patch issue #1041 multiple UC_HOOK_MEM callbacks for unaligned access
+    if (!code_read && !uc->size_recur_mem) {
         // this is date reading
         HOOK_FOREACH(uc, hook, UC_HOOK_MEM_READ) {
             if (hook->to_delete)
                 continue;
             if (!HOOK_BOUND_CHECK(hook, paddr))
                 continue;
+            if (!synced && !uc->skip_sync_pc_on_exit && retaddr) {
+                cpu_restore_state(uc->cpu, retaddr, false);
+                synced = true;
+            }
             JIT_CALLBACK_GUARD(((uc_cb_hookmem_t)hook->callback)(env->uc, UC_MEM_READ, paddr, size, 0, hook->user_data));
-
             // the last callback may already asked to stop emulation
             if (uc->stop_request)
                 break;
+        }
+
+        /* Unicorn: Previous callbacks may invalidate TLB, reload everything.
+                    This may have impact on performance but generally fine.
+                    A better approach is not always invalidating tlb but this
+                    might cause more chaos regarding re-entry (nested uc_emu_start).
+        */
+        if (tlb_entry_is_empty(entry)) {
+            tlb_fill(env_cpu(env), addr, size,
+                        access_type, mmu_idx, retaddr);
+            index = tlb_index(env, mmu_idx, addr);
+            entry = tlb_entry(env, mmu_idx, addr);
+            tlb_addr = code_read ? entry->addr_code : entry->addr_read;
+            tlb_addr &= ~TLB_INVALID_MASK;
         }
 
         // callback on non-readable memory
@@ -1570,6 +1689,10 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
                     continue;
                 if (!HOOK_BOUND_CHECK(hook, paddr))
                     continue;
+                if (!synced && !uc->skip_sync_pc_on_exit && retaddr) {
+                    cpu_restore_state(uc->cpu, retaddr, false);
+                    synced = true;
+                }
                 JIT_CALLBACK_GUARD_VAR(handled, 
                                        ((uc_cb_eventmem_t)hook->callback)(uc, UC_MEM_READ_PROT, paddr, size, 0, hook->user_data));
                 if (handled)
@@ -1601,12 +1724,12 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
                 if (uc->nested_level > 0 && !uc->cpu->stopped) {
                     cpu_exit(uc->cpu);
                     // See comments above
-                    cpu_loop_exit(uc->cpu);
+                    cpu_loop_exit_restore(uc->cpu, retaddr);
                 }
                 return 0;
             }
         }
-    } else {
+    } else if (code_read) {
         // code fetching
         // Unicorn: callback on fetch from NX
         if (mr != NULL && !(mr->perms & UC_PROT_EXEC)) {  // non-executable
@@ -1616,6 +1739,10 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
                     continue;
                 if (!HOOK_BOUND_CHECK(hook, paddr))
                     continue;
+                if (!synced && !uc->skip_sync_pc_on_exit && retaddr) {
+                    cpu_restore_state(uc->cpu, retaddr, false);
+                    synced = true;
+                }
                 JIT_CALLBACK_GUARD_VAR(handled,
                                        ((uc_cb_eventmem_t)hook->callback)(uc, UC_MEM_FETCH_PROT, paddr, size, 0, hook->user_data));
                 if (handled)
@@ -1635,7 +1762,7 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
                 if (uc->nested_level > 0 && !uc->cpu->stopped) {
                     cpu_exit(uc->cpu);
                     // See comments above
-                    cpu_loop_exit(uc->cpu);
+                    cpu_loop_exit_restore(uc->cpu, retaddr);
                 }
                 return 0;
             }
@@ -1726,6 +1853,10 @@ _out:
                     continue;
                 if (!HOOK_BOUND_CHECK(hook, paddr))
                     continue;
+                if (!synced && !uc->skip_sync_pc_on_exit && retaddr) {
+                    cpu_restore_state(uc->cpu, retaddr, false);
+                    synced = true;
+                }
                 JIT_CALLBACK_GUARD(((uc_cb_hookmem_t)hook->callback)(env->uc, UC_MEM_READ_AFTER, paddr, size, res, hook->user_data));
                 // the last callback may already asked to stop emulation
                 if (uc->stop_request)
@@ -2031,7 +2162,7 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
     uintptr_t index = tlb_index(env, mmu_idx, addr);
     CPUTLBEntry *entry = tlb_entry(env, mmu_idx, addr);
     target_ulong tlb_addr = tlb_addr_write(entry);
-    target_ulong paddr;
+    hwaddr paddr;
     const size_t tlb_off = offsetof(CPUTLBEntry, addr_write);
     unsigned a_bits = get_alignment_bits(get_memop(oi));
     void *haddr;
@@ -2039,6 +2170,7 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
     struct hook *hook;
     bool handled;
     MemoryRegion *mr;
+    bool synced = false;
 
     /* Handle CPU specific unaligned behaviour */
     if (addr & ((1 << a_bits) - 1)) {
@@ -2069,6 +2201,10 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
                 continue;
             if (!HOOK_BOUND_CHECK(hook, paddr))
                 continue;
+            if (!synced && !uc->skip_sync_pc_on_exit && retaddr) {
+                cpu_restore_state(uc->cpu, retaddr, false);
+                synced = true;
+            }
             JIT_CALLBACK_GUARD(((uc_cb_hookmem_t)hook->callback)(uc, UC_MEM_WRITE, paddr, size, val, hook->user_data));
             // the last callback may already asked to stop emulation
             if (uc->stop_request)
@@ -2084,6 +2220,10 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
                 continue;
             if (!HOOK_BOUND_CHECK(hook, paddr))
                 continue;
+            if (!synced && !uc->skip_sync_pc_on_exit && retaddr) {
+                cpu_restore_state(uc->cpu, retaddr, false);
+                synced = true;
+            }
             JIT_CALLBACK_GUARD_VAR(handled,
                                    ((uc_cb_eventmem_t)hook->callback)(uc, UC_MEM_WRITE_UNMAPPED, paddr, size, val, hook->user_data));
             if (handled)
@@ -2133,6 +2273,10 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
                 continue;
             if (!HOOK_BOUND_CHECK(hook, paddr))
                 continue;
+            if (!synced && !uc->skip_sync_pc_on_exit && retaddr) {
+                cpu_restore_state(uc->cpu, retaddr, false);
+                synced = true;
+            }
             JIT_CALLBACK_GUARD_VAR(handled,
                                    ((uc_cb_eventmem_t)hook->callback)(uc, UC_MEM_WRITE_PROT, paddr, size, val, hook->user_data));
             if (handled)
@@ -2216,7 +2360,7 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
 
         /* Handle clean RAM pages.  */
         if (tlb_addr & TLB_NOTDIRTY) {
-            notdirty_write(env_cpu(env), addr, size, iotlbentry, retaddr);
+            notdirty_write(env_cpu(env), addr, size, iotlbentry, retaddr, entry);
         }
 
         haddr = (void *)((uintptr_t)addr + entry->addend);

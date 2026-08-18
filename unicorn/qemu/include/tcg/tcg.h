@@ -276,7 +276,14 @@ typedef struct TCGPool {
 
 #define TCG_POOL_CHUNK_SIZE 32768
 
+#if HOST_LONG_BITS == 32
+// Unicorn: On 32 bits targets, our instrumentation uses extra temps and
+//          thus could exhaust the max temps and cause segment fault.
+//          Double the limit on 32 bits targets to avoid this.
+#define TCG_MAX_TEMPS 1024
+#else
 #define TCG_MAX_TEMPS 512
+#endif
 #define TCG_MAX_INSNS 512
 
 /* when the size of the arguments of a called function is smaller than
@@ -664,7 +671,7 @@ struct TCGContext {
     struct TCGLabelPoolData *pool_labels;
 #endif
 
-    TCGLabel *exitreq_label;
+    TCGv_i32 delay_slot_flag;
 
     TCGTempSet free_temps[TCG_TYPE_COUNT * 2];
     TCGTemp temps[TCG_MAX_TEMPS]; /* globals first, temps after */
@@ -709,6 +716,7 @@ struct TCGContext {
     TCGv_i64 cpu_bndu[4];
 
     /* qemu/tcg/i386/tcg-target.inc.c */
+    /* qemu/tcg/aarch64/tcg-target.inc.c */
     void *tb_ret_addr;
 
     /* target/riscv/translate.c */
@@ -807,6 +815,9 @@ struct TCGContext {
 
     char s390x_cpu_reg_names[16][4]; // renamed from original cpu_reg_names[][] to avoid name clash with m68k
     TCGv_i64 regs[16];
+
+    // loongarch 
+    bool use_lsx_instructions;
 };
 
 static inline size_t temp_idx(TCGContext *tcg_ctx, TCGTemp *ts)
@@ -1576,5 +1587,12 @@ struct jit_code_entry {
 
 void uc_del_inline_hook(uc_engine *uc, struct hook *hk);
 void uc_add_inline_hook(uc_engine *uc, struct hook *hk, void** args, int args_len);
+
+static inline bool tcg_uc_has_hookmem(TCGContext *s)
+{
+    return HOOK_EXISTS(s->uc, UC_HOOK_MEM_READ) ||
+        HOOK_EXISTS(s->uc, UC_HOOK_MEM_READ_AFTER) ||
+        HOOK_EXISTS(s->uc, UC_HOOK_MEM_WRITE);
+}
 
 #endif /* TCG_H */

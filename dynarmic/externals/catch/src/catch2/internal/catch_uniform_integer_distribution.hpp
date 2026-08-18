@@ -13,22 +13,6 @@
 
 namespace Catch {
 
-    namespace Detail {
-        // Indirection to enable make_unsigned<bool> behaviour.
-        template <typename T>
-        struct make_unsigned {
-            using type = std::make_unsigned_t<T>;
-        };
-
-        template <>
-        struct make_unsigned<bool> {
-            using type = uint8_t;
-        };
-
-        template <typename T>
-        using make_unsigned_t = typename make_unsigned<T>::type;
-    }
-
 /**
  * Implementation of uniform distribution on integers.
  *
@@ -44,14 +28,14 @@ template <typename IntegerType>
 class uniform_integer_distribution {
     static_assert(std::is_integral<IntegerType>::value, "...");
 
-    using UnsignedIntegerType = Detail::make_unsigned_t<IntegerType>;
+    using UnsignedIntegerType = Detail::SizedUnsignedType_t<sizeof(IntegerType)>;
 
-    // We store the left range bound converted to internal representation,
-    // because it will be used in computation in the () operator.
+    // Only the left bound is stored, and we store it converted to its
+    // unsigned image. This avoids having to do the conversions inside
+    // the operator(), at the cost of having to do the conversion in
+    // the a() getter. The right bound is only needed in the b() getter,
+    // so we recompute it there from other stored data.
     UnsignedIntegerType m_a;
-    // After initialization, right bound is only used for the b() getter,
-    // so we keep it in the original type.
-    IntegerType m_b;
 
     // How many different values are there in [a, b]. a == b => 1, can be 0 for distribution over all values in the type.
     UnsignedIntegerType m_ab_distance;
@@ -64,25 +48,24 @@ class uniform_integer_distribution {
     // distribution will be reused many times and this is an optimization.
     UnsignedIntegerType m_rejection_threshold = 0;
 
-    // Assumes m_b and m_a are already filled
-    UnsignedIntegerType computeDistance() const {
-        // This overflows and returns 0 if ua == 0 and ub == TYPE_MAX.
+    static constexpr UnsignedIntegerType computeDistance(IntegerType a, IntegerType b) {
+        // This overflows and returns 0 if a == 0 and b == TYPE_MAX.
         // We handle that later when generating the number.
-        return transposeTo(m_b) - m_a + 1;
+        return transposeTo(b) - transposeTo(a) + 1;
     }
 
-    static UnsignedIntegerType computeRejectionThreshold(UnsignedIntegerType ab_distance) {
+    static constexpr UnsignedIntegerType computeRejectionThreshold(UnsignedIntegerType ab_distance) {
         // distance == 0 means that we will return all possible values from
         // the type's range, and that we shouldn't reject anything.
         if ( ab_distance == 0 ) { return 0; }
         return ( ~ab_distance + 1 ) % ab_distance;
     }
 
-    static UnsignedIntegerType transposeTo(IntegerType in) {
+    static constexpr UnsignedIntegerType transposeTo(IntegerType in) {
         return Detail::transposeToNaturalOrder<IntegerType>(
             static_cast<UnsignedIntegerType>( in ) );
     }
-    static IntegerType transposeBack(UnsignedIntegerType in) {
+    static constexpr IntegerType transposeBack(UnsignedIntegerType in) {
         return static_cast<IntegerType>(
             Detail::transposeToNaturalOrder<IntegerType>(in) );
     }
@@ -90,16 +73,15 @@ class uniform_integer_distribution {
 public:
     using result_type = IntegerType;
 
-    uniform_integer_distribution( IntegerType a, IntegerType b ):
+    constexpr uniform_integer_distribution( IntegerType a, IntegerType b ):
         m_a( transposeTo(a) ),
-        m_b( b ),
-        m_ab_distance( computeDistance() ),
+        m_ab_distance( computeDistance(a, b) ),
         m_rejection_threshold( computeRejectionThreshold(m_ab_distance) ) {
         assert( a <= b );
     }
 
     template <typename Generator>
-    result_type operator()( Generator& g ) {
+    constexpr result_type operator()( Generator& g ) {
         // All possible values of result_type are valid.
         if ( m_ab_distance == 0 ) {
             return transposeBack( Detail::fillBitsFrom<UnsignedIntegerType>( g ) );
@@ -117,8 +99,8 @@ public:
         return transposeBack(m_a + emul.upper);
     }
 
-    result_type a() const { return transposeBack(m_a); }
-    result_type b() const { return m_b; }
+    constexpr result_type a() const { return transposeBack(m_a); }
+    constexpr result_type b() const { return transposeBack(m_ab_distance + m_a - 1); }
 };
 
 } // end namespace Catch

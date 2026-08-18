@@ -5,6 +5,22 @@ use crate::emulator::signal::SignalTask;
 use crate::emulator::thread::{WaiterTrait};
 use crate::linux::errno::Errno;
 
+/// Unlock a bionic mutex word left behind by an exited thread.
+/// `val & 3 != 0` is the locked/contended encoding; the next word is `__owner`.
+fn unlock_stale_futex<T: Clone>(backend: &Backend<T>, uaddr: u64, val: u32) {
+    let mut old = [0u8; 4];
+    if backend.mem_read(uaddr, &mut old).is_err() {
+        return;
+    }
+    if u32::from_le_bytes(old) != val {
+        return;
+    }
+    let _ = backend.mem_write(uaddr, &0u32.to_le_bytes());
+    if val & 3 != 0 {
+        let _ = backend.mem_write(uaddr.wrapping_add(4), &0u32.to_le_bytes());
+    }
+}
+
 pub struct FutexIndefinitelyWaiter<'a, T: Clone> {
     uaddr: u64,
     val: u32,
@@ -29,6 +45,12 @@ impl<'a, T: Clone> FutexIndefinitelyWaiter<'a, T> {
         }
         false
     }
+
+    pub fn release_for_deadlock(&mut self) -> bool {
+        self.woken_up = true;
+        unlock_stale_futex(&self.backend, self.uaddr, self.val);
+        true
+    }
 }
 
 impl<'a, T: Clone> WaiterTrait<'a, T> for FutexIndefinitelyWaiter<'a, T> {
@@ -37,8 +59,9 @@ impl<'a, T: Clone> WaiterTrait<'a, T> for FutexIndefinitelyWaiter<'a, T> {
             return true
         }
         let mut old = [0u8; 4];
-        self.backend.mem_read(self.uaddr, &mut old)
-            .expect("failed to read uaddr");
+        if self.backend.mem_read(self.uaddr, &mut old).is_err() {
+            return true;
+        }
         let val = u32::from_le_bytes(old);
         val != self.val
     }
@@ -89,6 +112,12 @@ impl<'a, T: Clone> FutexNanoSleepWaiter<'a, T> {
         }
         false
     }
+
+    pub fn release_for_deadlock(&mut self) -> bool {
+        self.woken_up = true;
+        unlock_stale_futex(&self.backend, self.uaddr, self.val);
+        true
+    }
 }
 
 impl<'a, T: Clone> WaiterTrait<'a, T> for FutexNanoSleepWaiter<'a, T> {
@@ -97,8 +126,9 @@ impl<'a, T: Clone> WaiterTrait<'a, T> for FutexNanoSleepWaiter<'a, T> {
             return true
         }
         let mut old = [0u8; 4];
-        self.backend.mem_read(self.uaddr, &mut old)
-            .expect("failed to read uaddr");
+        if self.backend.mem_read(self.uaddr, &mut old).is_err() {
+            return true;
+        }
         let val = u32::from_le_bytes(old);
         if val != self.val {
             return true;

@@ -407,7 +407,7 @@ static void tcg_region_assign(TCGContext *s, size_t curr_region)
     s->code_gen_ptr = start;
     s->code_gen_buffer_size = (char *)end - (char *)start;
 
-    memset(s->code_gen_buffer, 0x00, s->code_gen_buffer_size);
+    // memset(s->code_gen_buffer, 0x00, s->code_gen_buffer_size); // Outdated Unicorn hacks
     s->code_gen_highwater = (char *)end - TCG_HIGHWATER;
 }
 
@@ -538,7 +538,14 @@ void tcg_region_init(TCGContext *tcg_ctx)
     }
 
     tcg_ctx->tree = g_tree_new(tb_tc_cmp);
+    // Unicorn: Though this code is taken from CONFIG_USER_ONLY, it is crucial or
+    //          tcg_ctx->region.current is 0 and we will miss a tb_flush when the
+    //          buffer gets full.
+    {
+        bool err = tcg_region_initial_alloc__locked(tcg_ctx);
 
+        g_assert(!err);
+    }
 }
 
 /*
@@ -682,7 +689,7 @@ void uc_add_inline_hook(uc_engine *uc, struct hook *hk, void** args, int args_le
     case UC_HOOK_CODE:
         // (*uc_cb_hookcode_t)(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
         sizemask = dh_sizemask(void, 0) | dh_sizemask(ptr, 1) | dh_sizemask(i64, 2) | dh_sizemask(i32, 3) | dh_sizemask(ptr, 4);
-        snprintf(name, 63, "hookcode_%d_%" PRIx64 , hk->type, (uint64_t)hk->callback);
+        snprintf(name, 63, "hookcode_%d_%" PRIxPTR , hk->type, (uintptr_t)hk->callback);
         break;
 
     default:
@@ -812,6 +819,7 @@ TranslationBlock *tcg_tb_alloc(TCGContext *s)
     }
     s->code_gen_ptr = next;
     s->data_gen_ptr = NULL;
+    // memset((void*)tb, 0x00, sizeof(TranslationBlock)); // not necessary as both tb and tb->tc.ptr is reused here
     return tb;
 }
 
@@ -2235,17 +2243,6 @@ static inline void la_reset_pref(TCGContext *tcg_ctx, TCGTemp *ts)
         = (ts->state == TS_DEAD ? 0 : tcg_ctx->tcg_target_available_regs[ts->type]);
 }
 
-/*
-    Unicorn: for brcond, we should refresh liveness states for TCG globals
-*/
-static void la_brcond_end(TCGContext *s, int ng)
-{
-    int i;
-
-    for (i = 0; i < ng; i++) {
-        s->temps[i].state |= TS_MEM;
-    }
-}
 
 /* liveness analysis: end of function: all temps are dead, and globals
    should be in memory. */
@@ -2573,20 +2570,7 @@ static void liveness_pass_1(TCGContext *s)
             if (def->flags & TCG_OPF_BB_EXIT) {
                 la_func_end(s, nb_globals, nb_temps);
             } else if (def->flags & TCG_OPF_BB_END) {
-                // Unicorn: do not optimize dead temps on brcond,
-                // this causes problem because check_exit_request() inserts
-                // brcond instruction in the middle of the TB,
-                // which incorrectly flags end-of-block
-                if (opc != INDEX_op_brcond_i32) {
-                    la_bb_end(s, nb_globals, nb_temps);
-                } else {
-                    // Unicorn: we do not touch dead temps for brcond,
-                    // but we should refresh TCG globals In-Memory states,
-                    // otherwise, important CPU states(especially conditional flags) might be forgotten,
-                    // result in wrongly generated host code that run into wrong branch.
-                    // Refer to https://github.com/unicorn-engine/unicorn/issues/287 for further information
-                    la_brcond_end(s, nb_globals);
-                }
+                la_bb_end(s, nb_globals, nb_temps);
             } else if (def->flags & TCG_OPF_SIDE_EFFECTS) {
                 la_global_sync(s, nb_globals);
                 if (def->flags & TCG_OPF_CALL_CLOBBER) {
@@ -3728,7 +3712,7 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
     TCGOp *op;
 
 #ifndef NDEBUG
-    if (getenv("UNICORN_DEBUG")) {
+    if (is_log_level_active(CPU_LOG_TB_IN_ASM)) {
         tcg_dump_ops(s, false, "TCG before optimization:");
     }
 #endif
@@ -3777,7 +3761,7 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
 #endif
 
 #ifndef NDEBUG
-    if (getenv("UNICORN_DEBUG")) {
+    if (is_log_level_active(CPU_LOG_TB_IN_ASM)) {
         tcg_dump_ops(s, false, "TCG before codegen:");
     }
 #endif

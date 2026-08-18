@@ -38,12 +38,15 @@ See [docs/COMPILE.md](docs/COMPILE.md) file for how to compile and install Unico
 
 More documentation is available in [docs/README.md](docs/README.md).
 
+For common questions, read [docs/FAQ.md](docs/FAQ.md) before raising an issue.
 
 Contact
 -------
 
 [Contact us](http://www.unicorn-engine.org/contact/) via mailing list, email or twitter for any questions.
 
+
+Join [our group](https://t.me/+lnNl0fPpyCYzZmVh) for instant feedback.
 
 Contribute
 ----------
@@ -52,5 +55,6 @@ If you want to contribute, please pick up something from our [Github issues](htt
 
 We also maintain a list of more challenged problems in [milestones](https://github.com/unicorn-engine/unicorn/milestones) for our regular release.
 
-[CREDITS.TXT](CREDITS.TXT) records important contributors of our project.
+Please send pull request to our [dev branch](https://github.com/unicorn-engine/unicorn/tree/dev).
 
+[CREDITS.TXT](CREDITS.TXT) records important contributors of our project.

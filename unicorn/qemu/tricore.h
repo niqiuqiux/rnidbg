@@ -4,6 +4,7 @@
 #ifndef UNICORN_ARCH_POSTFIX
 #define UNICORN_ARCH_POSTFIX _tricore
 #endif
+#define gen_helper_check_exit_request gen_helper_check_exit_request_tricore
 #define unicorn_fill_tlb unicorn_fill_tlb_tricore
 #define reg_read reg_read_tricore
 #define reg_write reg_write_tricore
@@ -54,6 +55,7 @@
 #define vm_start vm_start_tricore
 #define address_space_dispatch_compact address_space_dispatch_compact_tricore
 #define flatview_translate flatview_translate_tricore
+#define flatview_copy flatview_copy_tricore
 #define address_space_translate_for_iotlb address_space_translate_for_iotlb_tricore
 #define qemu_get_cpu qemu_get_cpu_tricore
 #define cpu_address_space_init cpu_address_space_init_tricore
@@ -90,6 +92,7 @@
 #define iotlb_to_section iotlb_to_section_tricore
 #define address_space_dispatch_new address_space_dispatch_new_tricore
 #define address_space_dispatch_free address_space_dispatch_free_tricore
+#define address_space_dispatch_clear address_space_dispatch_clear_tricore
 #define flatview_read_continue flatview_read_continue_tricore
 #define address_space_read_full address_space_read_full_tricore
 #define address_space_write address_space_write_tricore
@@ -794,6 +797,7 @@
 #define get_page_addr_code get_page_addr_code_tricore
 #define probe_access probe_access_tricore
 #define tlb_vaddr_to_host tlb_vaddr_to_host_tricore
+#define tlb_vaddr_to_paddr tlb_vaddr_to_paddr_tricore
 #define helper_ret_ldub_mmu helper_ret_ldub_mmu_tricore
 #define helper_le_lduw_mmu helper_le_lduw_mmu_tricore
 #define helper_be_lduw_mmu helper_be_lduw_mmu_tricore
@@ -1287,6 +1291,9 @@
 #define gen_helper_vfp_set_fpscr gen_helper_vfp_set_fpscr_tricore
 #define gen_helper_cpsr_read gen_helper_cpsr_read_tricore
 #define gen_helper_cpsr_write gen_helper_cpsr_write_tricore
+#define tlb_reset_dirty_by_vaddr tlb_reset_dirty_by_vaddr_tricore
+#define helper_stqcx_le_parallel helper_stqcx_le_parallel_tricore
+#define helper_stqcx_be_parallel helper_stqcx_be_parallel_tricore
 #define helper_fadd helper_fadd_tricore
 #define helper_fsub helper_fsub_tricore
 #define helper_fmul helper_fmul_tricore

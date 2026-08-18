@@ -37,7 +37,7 @@ struct RunCodeCallbacks {
 
 class BlockOfCode final : public Xbyak::CodeGenerator {
 public:
-    BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_code_size, const std::function<void(BlockOfCode&)>& rcp);
+    BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_code_size, std::function<void(BlockOfCode&)> rcp);
     BlockOfCode(const BlockOfCode&) = delete;
 
     /// Call when external emitters have finished emitting their preludes.
@@ -196,8 +196,8 @@ private:
     RunCodeFuncType step_code = nullptr;
     static constexpr size_t MXCSR_ALREADY_EXITED = 1 << 0;
     static constexpr size_t FORCE_RETURN = 1 << 1;
-    std::array<const void*, 4> return_from_run_code{};
-    void GenRunCode(const std::function<void(BlockOfCode&)>& rcp);
+    std::array<const void*, 4> return_from_run_code;
+    void GenRunCode(std::function<void(BlockOfCode&)> rcp);
 
     const HostFeature host_features;
 };

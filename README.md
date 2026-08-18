@@ -1,11 +1,39 @@
 # RNIDBG
 
-An ARM64 emulator written in Rust, based on the secondary development of unidbg.。[Join us now!](https://discord.gg/MKR2wz863h)
+ARM64 Android **API 36** userland runtime in Rust (unidbg-inspired).
+JNI facade + ELF/PIE process entry. No Java bytecode, no ARM32, no iOS.
 
-## Build Me
+## Build
 
-- Make sure your Rust version is 1.79+, otherwise upgrade!
-- If Linux, make sure that `libfmt`/`boost` is available in your environment (**dynarmic backend**).
+- Rust 1.79+
+- Linux: `libfmt` / `boost` for the dynarmic backend
+
+## Android 36 system root
+
+Real bionic libraries are required (NDK stubs will not boot):
+
+```powershell
+powershell -File android/sdk36/pull.ps1
+```
+
+Default root is `./android/sdk36`. Override with `BASE_PATH`.
+
+## CLI
+
+```text
+rnidbg exec --bin tests/fixtures/arm64/test
+rnidbg jni  --so  tests/fixtures/arm64/libnative.so --onload
+```
+
+Library API:
+
+```rust
+let emu = AndroidEmulator::create_arm64(2667, 2427, "app", ());
+let module = emu.load_library("libfoo.so", true)?;
+let vm = emu.create_jni_env();
+vm.call_jni_onload(emu.clone(), unsafe { &*module.get() })?;
+// or: unsafe { &*module.get() }.call_entry(&emu, &["--help"])?;
+```
 
 ## DEVELOPER DEBUGGING COMPILE TIME VARIABLES
 

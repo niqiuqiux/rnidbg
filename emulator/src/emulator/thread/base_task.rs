@@ -1,4 +1,4 @@
-use log::{info, warn};
+use log::warn;
 
 use crate::emulator::AndroidEmulator;
 use crate::emulator::func::FunctionCall;
@@ -52,8 +52,27 @@ impl <'a, T: Clone> BaseTask<'a, T> {
             backend.context_restore(context)
                 .expect("[continue_run] failed to restore context");
         }
-        let pc = backend.reg_read(RegisterARM64::PC)
+        let mut pc = backend.reg_read(RegisterARM64::PC)
             .expect("[continue_run] failed to get pc");
+        let lr = backend.reg_read(RegisterARM64::LR).unwrap_or(0);
+        let x0 = backend.reg_read(RegisterARM64::X0).unwrap_or(0);
+        let x8 = backend.reg_read(RegisterARM64::X8).unwrap_or(0);
+        // After Halt in a leaf `svc #0`, resume at LR. The wrapper's
+        // post-SVC CMN/RET is equivalent once X0 is set by the waiter.
+        if lr != 0 && pc >= 4 {
+            let mut insn = [0u8; 4];
+            if backend.mem_read(pc - 4, &mut insn).is_ok() {
+                let w = u32::from_le_bytes(insn);
+                if w & 0xffe0_001f == 0xd400_0001 {
+                    let _ = backend.reg_write(RegisterARM64::PC, lr);
+                    pc = lr;
+                }
+            }
+        }
+        log::debug!(
+            "continue_run pc=0x{:x} lr=0x{:x} x0=0x{:x} x8=0x{:x} until=0x{:x}",
+            pc, lr, x0, x8, until
+        );
         if let Some(waiter) = &self.waiter {
             match waiter {
                 Waiter::FutexIndefinite(futex_waiter) => {
@@ -63,12 +82,14 @@ impl <'a, T: Clone> BaseTask<'a, T> {
                     futex_task.on_continue_run(emulator);
                 }
                 Waiter::Unknown(_) => {
-                    panic!("unknown waiter: continue_run");
+                    warn!("unknown waiter on continue_run, ignoring");
                 }
             }
             self.waiter = None;
         }
-        emulator.emulate(pc, until)
+        let ret = emulator.emulate(pc, until);
+        log::debug!("continue_run finished pc=0x{:x} ret={:?}", pc, ret);
+        ret
     }
 
     pub fn allocate_stack(&mut self, emulator: &AndroidEmulator<'a, T>) -> VMPointer<'a, T> {
@@ -94,7 +115,8 @@ impl<'a, T: Clone> RunnableTask<'a, T> for BaseTask<'a, T> {
                     <FutexNanoSleepWaiter<'_, T> as WaiterTrait<'_, T>>::can_dispatch(futex_task)
                 }
                 Waiter::Unknown(_) => {
-                    panic!("unknown waiter: can_dispatch");
+                    warn!("unknown waiter on can_dispatch, treating as runnable");
+                    true
                 }
             }
         }

@@ -65,16 +65,16 @@ typedef size_t uc_hook;
 #define UNICORN_DEPRECATED __declspec(deprecated)
 #else
 #pragma message(                                                               \
-        "WARNING: You need to implement UNICORN_DEPRECATED for this compiler")
+    "WARNING: You need to implement UNICORN_DEPRECATED for this compiler")
 #define UNICORN_DEPRECATED
 #endif
 
 // Unicorn API version
 #define UC_API_MAJOR 2
-#define UC_API_MINOR 0
-#define UC_API_PATCH 2
+#define UC_API_MINOR 1
+#define UC_API_PATCH 4
 // Release candidate version, 255 means the official release.
-#define UC_API_EXTRA 1
+#define UC_API_EXTRA 255
 
 // Unicorn package version
 #define UC_VERSION_MAJOR UC_API_MAJOR
@@ -245,7 +245,22 @@ typedef uint32_t (*uc_cb_insn_in_t)(uc_engine *uc, uint32_t port, int size,
 typedef void (*uc_cb_insn_out_t)(uc_engine *uc, uint32_t port, int size,
                                  uint32_t value, void *user_data);
 
+// The definitions for `uc_cb_tlbevent_t` callback
+typedef enum uc_prot {
+    UC_PROT_NONE = 0,
+    UC_PROT_READ = 1,
+    UC_PROT_WRITE = 2,
+    UC_PROT_EXEC = 4,
+    UC_PROT_ALL = 7,
+} uc_prot;
+
+struct uc_tlb_entry {
+    uint64_t paddr;
+    uc_prot perms;
+};
+
 typedef struct uc_tlb_entry uc_tlb_entry;
+
 // All type of memory accesses for UC_HOOK_MEM_*
 typedef enum uc_mem_type {
     UC_MEM_READ = 16,      // Memory is read from
@@ -418,7 +433,10 @@ typedef enum uc_hook_type {
     (UC_HOOK_MEM_READ + UC_HOOK_MEM_WRITE + UC_HOOK_MEM_FETCH)
 
 /*
-  Callback function for hooking memory (READ, WRITE & FETCH)
+  Callback function for hooking memory (READ, WRITE & FETCH).
+
+  NOTE: The access might be splitted depending on the MMU implementation.
+  UC_TLB_VIRTUAL provides more fine-grained control about memory accessing.
 
   @type: this memory is being READ, or WRITE
   @address: address where memory is being written or read to
@@ -433,6 +451,9 @@ typedef void (*uc_cb_hookmem_t)(uc_engine *uc, uc_mem_type type,
 /*
   Callback function for handling invalid memory access events (UNMAPPED and
     PROT events)
+
+  NOTE: The access might be splitted depending on the MMU implementation.
+  UC_TLB_VIRTUAL provides more fine-grained control about memory accessing.
 
   @type: this memory is being READ, or WRITE
   @address: address where memory is being written or read to
@@ -842,7 +863,7 @@ uc_err uc_reg_read2(uc_engine *uc, int regid, void *value, size_t *size);
  invalid
 */
 UNICORN_EXPORT
-uc_err uc_reg_write_batch(uc_engine *uc, int *regs, void *const *vals,
+uc_err uc_reg_write_batch(uc_engine *uc, int const *regs, void *const *vals,
                           int count);
 
 /*
@@ -857,7 +878,8 @@ uc_err uc_reg_write_batch(uc_engine *uc, int *regs, void *const *vals,
  invalid
 */
 UNICORN_EXPORT
-uc_err uc_reg_read_batch(uc_engine *uc, int *regs, void **vals, int count);
+uc_err uc_reg_read_batch(uc_engine *uc, int const *regs, void **vals,
+                         int count);
 
 /*
  Write multiple register values.
@@ -873,8 +895,8 @@ uc_err uc_reg_read_batch(uc_engine *uc, int *regs, void **vals, int count);
  corresponding register.
 */
 UNICORN_EXPORT
-uc_err uc_reg_write_batch2(uc_engine *uc, int *regs, const void *const *vals,
-                           size_t *sizes, int count);
+uc_err uc_reg_write_batch2(uc_engine *uc, int const *regs,
+                           const void *const *vals, size_t *sizes, int count);
 
 /*
  Read multiple register values.
@@ -891,7 +913,7 @@ uc_err uc_reg_write_batch2(uc_engine *uc, int *regs, const void *const *vals,
  corresponding register.
 */
 UNICORN_EXPORT
-uc_err uc_reg_read_batch2(uc_engine *uc, int *regs, void *const *vals,
+uc_err uc_reg_read_batch2(uc_engine *uc, int const *regs, void *const *vals,
                           size_t *sizes, int count);
 
 /*
@@ -909,7 +931,7 @@ uc_err uc_reg_read_batch2(uc_engine *uc, int *regs, void *const *vals,
 */
 UNICORN_EXPORT
 uc_err uc_mem_write(uc_engine *uc, uint64_t address, const void *bytes,
-                    size_t size);
+                    uint64_t size);
 
 /*
  Read a range of bytes in memory.
@@ -925,7 +947,83 @@ uc_err uc_mem_write(uc_engine *uc, uint64_t address, const void *bytes,
    for detailed error).
 */
 UNICORN_EXPORT
-uc_err uc_mem_read(uc_engine *uc, uint64_t address, void *bytes, size_t size);
+uc_err uc_mem_read(uc_engine *uc, uint64_t address, void *bytes, uint64_t size);
+
+/*
+ Read a range of bytes in memory after mmu translation.
+
+ @uc:      handle returned by uc_open()
+ @address: starting virtual memory address of bytes to get.
+ @prot:    The access type for the tlb lookup
+ @bytes:   pointer to a variable containing data copied from memory.
+ @size:    size of memory to read.
+
+ NOTE: @bytes must be big enough to contain @size bytes.
+
+ This function will translate the address with the MMU. Therefore all
+ pages needs to be memory mapped with the proper access rights. The MMU
+ will not translate the virtual address when the pages are not mapped
+ with the given access rights.
+
+ Note the `prot` is different from the underlying protections of the physicall
+ memory regions. For instance, if a region of phyiscal memory is mapped with
+ write-only permissions, only a call with prot == UC_PROT_WRITE will be able to
+ read the contents.
+
+ @return UC_ERR_OK on success, or other value on failure (refer to uc_err enum
+   for detailed error).
+*/
+UNICORN_EXPORT
+uc_err uc_vmem_read(uc_engine *uc, uint64_t address, uc_prot prot,
+                           void *bytes, size_t size);
+
+/*
+ Write to a range of bytes in memory after mmu translation.
+
+ @uc: handle returned by uc_open()
+ @address: starting memory address of bytes to set.
+ @prot:    The access type for the tlb lookup
+ @bytes:   pointer to a variable containing data to be written to memory.
+ @size:   size of memory to write to.
+
+ This function will translate the address with the MMU. Therefore all
+ pages needs to be memory mapped with the proper access rights. The MMU
+ will not translate the virtual address when the pages are not mapped
+ with the given access rights.
+
+ When the pages are mapped with the given access rights the write will
+ happen indipenden from the access rights of the mapping. So when you
+ have a page read only mapped, a call with prot == UC_PROT_READ will
+ be able to write the data.
+
+ NOTE: @bytes must be big enough to contain @size bytes.
+
+ @return UC_ERR_OK on success, or other value on failure (refer to uc_err enum
+   for detailed error).
+*/
+UNICORN_EXPORT
+uc_err uc_vmem_write(uc_engine *uc, uint64_t address, uc_prot prot,
+                           void *bytes, size_t size);
+
+/*
+ Translate a virtuall address to a physical address
+
+ @uc:
+ @address:  virtual address to translate
+ @prot:     The access type for the tlb lookup
+ @paddress: A pointer to store the result
+
+ This function will translate the address with the MMU. Therefore all
+ pages needs to be memory mapped with the proper access rights. The MMU
+ will not translate the virtual address when the pages are not mapped
+ with the given access rights.
+
+ @return UC_ERR_OK on success, or other value on failure (refer to uc_err enum
+   for detailed error).
+*/
+UNICORN_EXPORT
+uc_err uc_vmem_translate(uc_engine *uc, uint64_t address, uc_prot prot,
+                              uint64_t *paddress);
 
 /*
  Emulate machine code in a specific duration of time.
@@ -1005,18 +1103,15 @@ uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
 UNICORN_EXPORT
 uc_err uc_hook_del(uc_engine *uc, uc_hook hh);
 
-typedef enum uc_prot {
-    UC_PROT_NONE = 0,
-    UC_PROT_READ = 1,
-    UC_PROT_WRITE = 2,
-    UC_PROT_EXEC = 4,
-    UC_PROT_ALL = 7,
-} uc_prot;
-
-struct uc_tlb_entry {
-    uint64_t paddr;
-    uc_prot perms;
-};
+/*
+ Variables to control which state should be stored in the context.
+ Defaults to UC_CTL_CONTEXT_CPU. The options are used in a bitfield
+ so to enable more then one content the binary or of the required
+ contents can be use.
+ The UC_CTL_CONTEXT_MEMORY stores some pointers to internal allocated
+ memory. Therefor it's not possible to use this context with another
+ unicorn object.
+*/
 
 typedef enum uc_context_content {
     UC_CTL_CONTEXT_CPU = 1,
@@ -1042,7 +1137,8 @@ typedef enum uc_context_content {
    for detailed error).
 */
 UNICORN_EXPORT
-uc_err uc_mem_map(uc_engine *uc, uint64_t address, size_t size, uint32_t perms);
+uc_err uc_mem_map(uc_engine *uc, uint64_t address, uint64_t size,
+                  uint32_t perms);
 
 /*
  Map existing host memory in for emulation.
@@ -1067,7 +1163,7 @@ uc_err uc_mem_map(uc_engine *uc, uint64_t address, size_t size, uint32_t perms);
    for detailed error).
 */
 UNICORN_EXPORT
-uc_err uc_mem_map_ptr(uc_engine *uc, uint64_t address, size_t size,
+uc_err uc_mem_map_ptr(uc_engine *uc, uint64_t address, uint64_t size,
                       uint32_t perms, void *ptr);
 
 /*
@@ -1090,7 +1186,7 @@ uc_err uc_mem_map_ptr(uc_engine *uc, uint64_t address, size_t size,
    for detailed error).
  */
 UNICORN_EXPORT
-uc_err uc_mmio_map(uc_engine *uc, uint64_t address, size_t size,
+uc_err uc_mmio_map(uc_engine *uc, uint64_t address, uint64_t size,
                    uc_cb_mmio_read_t read_cb, void *user_data_read,
                    uc_cb_mmio_write_t write_cb, void *user_data_write);
 
@@ -1110,7 +1206,7 @@ uc_err uc_mmio_map(uc_engine *uc, uint64_t address, size_t size,
    for detailed error).
 */
 UNICORN_EXPORT
-uc_err uc_mem_unmap(uc_engine *uc, uint64_t address, size_t size);
+uc_err uc_mem_unmap(uc_engine *uc, uint64_t address, uint64_t size);
 
 /*
  Set memory permissions for emulation memory.
@@ -1131,7 +1227,7 @@ uc_err uc_mem_unmap(uc_engine *uc, uint64_t address, size_t size);
    for detailed error).
 */
 UNICORN_EXPORT
-uc_err uc_mem_protect(uc_engine *uc, uint64_t address, size_t size,
+uc_err uc_mem_protect(uc_engine *uc, uint64_t address, uint64_t size,
                       uint32_t perms);
 
 /*
@@ -1262,8 +1358,8 @@ uc_err uc_context_reg_read2(uc_context *ctx, int regid, void *value,
    for detailed error).
 */
 UNICORN_EXPORT
-uc_err uc_context_reg_write_batch(uc_context *ctx, int *regs, void *const *vals,
-                                  int count);
+uc_err uc_context_reg_write_batch(uc_context *ctx, int const *regs,
+                                  void *const *vals, int count);
 
 /*
  Read multiple register values from a context.
@@ -1277,7 +1373,7 @@ uc_err uc_context_reg_write_batch(uc_context *ctx, int *regs, void *const *vals,
    for detailed error).
 */
 UNICORN_EXPORT
-uc_err uc_context_reg_read_batch(uc_context *ctx, int *regs, void **vals,
+uc_err uc_context_reg_read_batch(uc_context *ctx, int const *regs, void **vals,
                                  int count);
 
 /*
@@ -1294,7 +1390,7 @@ uc_err uc_context_reg_read_batch(uc_context *ctx, int *regs, void **vals,
  corresponding register.
 */
 UNICORN_EXPORT
-uc_err uc_context_reg_write_batch2(uc_context *ctx, int *regs,
+uc_err uc_context_reg_write_batch2(uc_context *ctx, int const *regs,
                                    const void *const *vals, size_t *sizes,
                                    int count);
 
@@ -1313,8 +1409,8 @@ uc_err uc_context_reg_write_batch2(uc_context *ctx, int *regs,
  corresponding register.
 */
 UNICORN_EXPORT
-uc_err uc_context_reg_read_batch2(uc_context *ctx, int *regs, void *const *vals,
-                                  size_t *sizes, int count);
+uc_err uc_context_reg_read_batch2(uc_context *ctx, int const *regs,
+                                  void *const *vals, size_t *sizes, int count);
 
 /*
  Restore the current CPU context from a saved copy.

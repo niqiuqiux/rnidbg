@@ -5,6 +5,7 @@ pub(crate) mod cpuinfo;
 pub(crate) mod random_boot_id;
 pub mod direction;
 pub(crate) mod maps;
+pub(crate) mod stdio;
 
 use std::io::{Cursor, Read};
 use std::marker::PhantomData;

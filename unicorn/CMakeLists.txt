@@ -1,7 +1,7 @@
 # CMake setup for Unicorn 2.
 # By Huitao Chen & Nguyen Anh Quynh, 2019-2020
 
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.5...3.20)
 
 # Only required for MSVC, but we can't know the compiler at this point because we haven't
 # called enable_language() or project(), and if we did that it would lock in the old
@@ -30,6 +30,24 @@ if(APPLE AND NOT CMAKE_C_COMPILER)
     set(CMAKE_C_COMPILER "/usr/bin/cc")
 endif()
 
+# Source: https://github.com/capstone-engine/capstone/blob/next/CMakeLists.txt
+# If building for OSX it's best to allow CMake to handle building both architectures
+if(APPLE)
+    # The cibuildwheel on Github Actions sets this env variable
+    # with the architecture flags it wants to build for.
+    if(DEFINED ENV{ARCHFLAGS})
+        if("$ENV{ARCHFLAGS}" STREQUAL "-arch arm64 -arch x86_64")
+            set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64")
+        elseif("$ENV{ARCHFLAGS}" STREQUAL "-arch arm64")
+            set(CMAKE_OSX_ARCHITECTURES "arm64")
+        elseif("$ENV{ARCHFLAGS}" STREQUAL "-arch x86_64")
+            set(CMAKE_OSX_ARCHITECTURES "x86_64")
+        endif()
+    else()
+        set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64")
+    endif()
+endif()
+
 # Detect if unicorn is compiled as the top-level project
 set(PROJECT_IS_TOP_LEVEL OFF)
 if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
@@ -52,8 +70,8 @@ endif()
 set(CMAKE_C_STANDARD 11)
 
 set(UNICORN_VERSION_MAJOR 2)
-set(UNICORN_VERSION_MINOR 0)
-set(UNICORN_VERSION_PATCH 2)
+set(UNICORN_VERSION_MINOR 1)
+set(UNICORN_VERSION_PATCH 4)
 
 include(cmake/bundle_static.cmake)
 
@@ -63,7 +81,9 @@ include(cmake/bundle_static.cmake)
 # Also we would like users to link a native cmake target, instead of a custom target for better
 # compatability.
 option(BUILD_SHARED_LIBS "Build shared instead of static library" ${PROJECT_IS_TOP_LEVEL})
+option(UNICORN_LEGACY_STATIC_ARCHIVE "Enable Unicorn v1 style all-in-one objects archive for libunicorn.a" ${PROJECT_IS_TOP_LEVEL})
 option(UNICORN_FUZZ "Enable fuzzing" OFF)
+option(UNICORN_LOGGING "Enable logging" OFF)
 option(UNICORN_BUILD_TESTS "Build unicorn tests" ${PROJECT_IS_TOP_LEVEL})
 option(UNICORN_INSTALL "Enable unicorn installation" ${PROJECT_IS_TOP_LEVEL})
 set(UNICORN_ARCH "x86;arm;aarch64;riscv;mips;sparc;m68k;ppc;s390x;tricore" CACHE STRING "Enabled unicorn architectures")
@@ -91,6 +111,11 @@ include_directories(
     include
     qemu/tcg
 )
+
+# QEMU logging facility
+if (UNICORN_LOGGING)
+    add_compile_options(-DUNICORN_LOGGING)
+endif()
 
 # Some distributions on some rare architecures don't auto link atomic for us and
 # we do this manually by adding flags.
@@ -144,17 +169,18 @@ else()
         execute_process(COMMAND ${CMAKE_C_COMPILER} -dumpmachine
             OUTPUT_VARIABLE UC_COMPILER_VERSION)
 
-        string(FIND "${UC_COMPILER_VERSION}" "i686" UC_RET)
-        if(${UC_RET} GREATER_EQUAL "0")
+        if(UC_COMPILER_VERSION MATCHES "^i686.*")
             set(UNICORN_TARGET_ARCH "i386")
             set(UNICORN_CFLAGS -m32 -static-libgcc) # Workaround for github action bugs
             set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -m32")
             set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -m32")
-        else()
+        elseif(UC_COMPILER_VERSION MATCHES "^x86_64.*")
             set(UNICORN_TARGET_ARCH "i386")
             set(UNICORN_CFLAGS -m64 -mcx16)
             set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -m64")
             set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -m64")
+        elseif(UC_COMPILER_VERSION MATCHES "^aarch64.*")
+            set(UNICORN_TARGET_ARCH "aarch64")
         endif()
     elseif(ANDROID_ABI)
         string(FIND "${ANDROID_ABI}" "arm64" UC_RET)
@@ -248,6 +274,11 @@ else()
                 set(UNICORN_TARGET_ARCH "tricore")
                 break()
             endif()
+            string(FIND ${UC_COMPILER_MACRO} "loongarch64" UC_RET)
+            if (${UC_RET} GREATER_EQUAL "0")
+                set(UNICORN_TARGET_ARCH "loongarch64")
+                break()
+            endif()
             message(FATAL_ERROR "Unknown host compiler: ${CMAKE_C_COMPILER}.")
         endwhile(TRUE)
     endif()
@@ -337,6 +368,12 @@ else()
     set(TARGET_LIST "${TARGET_LIST} ")
 
     # GEN config-host.mak & target directories
+    # MESSAGE(STATUS "sh ${CMAKE_CURRENT_SOURCE_DIR}/qemu/configure
+    #     --cc=${CMAKE_C_COMPILER}
+    #     ${EXTRA_CFLAGS}
+    #     ${TARGET_LIST}
+    #     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}"
+    # )
     execute_process(COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/qemu/configure
         --cc=${CMAKE_C_COMPILER}
         ${EXTRA_CFLAGS}
@@ -1418,16 +1455,18 @@ if (BUILD_SHARED_LIBS)
 endif()
 
 # Black magic for generating static archives...
-if (BUILD_SHARED_LIBS)
-    if (MSVC)
-        # Avoid the import lib built by MVSC clash with our archive.
-        set_target_properties(unicorn PROPERTIES ARCHIVE_OUTPUT_NAME "unicorn-import")
+if (UNICORN_LEGACY_STATIC_ARCHIVE)
+    if (BUILD_SHARED_LIBS)
+        if (MSVC)
+            # Avoid the import lib built by MVSC clash with our archive.
+            set_target_properties(unicorn PROPERTIES ARCHIVE_OUTPUT_NAME "unicorn-import")
+        endif()
+        bundle_static_library(unicorn_static unicorn_archive unicorn)
+    else()
+        # Rename the "static" lib to avoid filename clash.
+        set_target_properties(unicorn PROPERTIES OUTPUT_NAME "unicorn-static")
+        bundle_static_library(unicorn unicorn_archive unicorn)
     endif()
-    bundle_static_library(unicorn_static unicorn_archive unicorn)
-else()
-    # Rename the "static" lib to avoid filename clash.
-    set_target_properties(unicorn PROPERTIES OUTPUT_NAME "unicorn-static")
-    bundle_static_library(unicorn unicorn_archive unicorn)
 endif()
 
 if(UNICORN_FUZZ)
@@ -1480,7 +1519,7 @@ if(UNICORN_BUILD_TESTS)
 endif()
 
 
-if(UNICORN_INSTALL AND NOT MSVC)
+if(UNICORN_INSTALL)
     include("GNUInstallDirs")
     file(GLOB UNICORN_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/unicorn/*.h)
     if (BUILD_SHARED_LIBS)
@@ -1490,7 +1529,10 @@ if(UNICORN_INSTALL AND NOT MSVC)
             LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         )
     endif()
-    install(FILES $<TARGET_FILE:unicorn_archive> DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    if (UNICORN_LEGACY_STATIC_ARCHIVE)
+        install(FILES $<TARGET_FILE:unicorn_archive> DESTINATION ${CMAKE_INSTALL_LIBDIR})
+        install(FILES $<TARGET_FILE_DIR:unicorn_archive>/$<TARGET_PROPERTY:unicorn_archive,SYMLINK_NAME> DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    endif()
     install(FILES ${UNICORN_HEADERS} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/unicorn)
     if (ATOMIC_LINKAGE_FIX)
         set(ATOMIC_LINK_PKG_CONFIG " -latomic")

@@ -9,6 +9,9 @@ Optimize your program with less instrumentation, e.g. by using `UC_HOOK_BLOCK` i
 
 ## Why do I get a wrong PC after emulation stops?
 
+<details>
+  <summary>For version < 2.1.4 </summary>
+  
 Updating PC is a very large overhead (10x slower in the worst case, see FAQ above) for emulation so the PC sync guarantee is explained below in several cases:
 
 - A `UC_HOOK_CODE` hook is installed. In this case, the PC is sync-ed _everywhere_ within the effective range of the hook. However, on some architectures, the PC might by sync-ed all the time if the hook is installed in any range. Note using `count` in `uc_emu_start` implies installing a `UC_HOOK_CODE` hook.
@@ -33,10 +36,19 @@ mov x0, #1
 mov x1, #2
 ldr x0, [x1] <--- exception here and PC sync-ed here
 ```
+  
+</details>
+
+<details>
+  <summary>For version >= 2.1.4 </summary>
+
+We should always have valid PC all the time. Please report an issue for your case.
+
+</details>
 
 ## I get an “Unhandled CPU Exception”, why?
 
-Unicorn is a pure CPU emulator and usually it’s due to no handler registered for instructions like `syscall` and `SVC`. If you expect system emulation, you probably would like [qiling framework](https://github.com/qilingframework/qiling).
+Unicorn is a pure CPU emulator and usually it’s due to no handler registered for instructions like `syscall` and `SVC`. If you expect syscall and userland emulation, you probably would like [qiling framework](https://github.com/qilingframework/qiling).
 
 ## I would like to instrument a specific instruction but get a `UC_ERR_HOOK`, why?
 
@@ -122,6 +134,143 @@ Starting from 2.0.2, Unicorn will emulate the MMU depending on the emulated arch
 Therefore, if you still prefer the previous `paddr = vaddr` simple mapping, we have a simple experimental MMU implementation that can be switched on by: `uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL)`. With this mode, you could also add a `UC_HOOK_TLB_FILL` hook to manage the TLB. When a virtual address is not cached, the hook will be called. Besides, users are allowed to flush the tlb with `uc_ctl_flush_tlb`.
 
 In theory, `UC_TLB_VIRTUAL` will achieve better performance as it skips all MMU details, though not benchmarked.
+
+## Something is wrong - I would like to dig deeper
+
+Unicorn uses at several places logging by the qemu implementation.
+This might provide a first glance what could be wrong.
+
+The logs contains optionally the filename and the line number including
+additional messages to indicate what is happening.
+However, the qemu logs are partially commented-out and incomplete, but give it a try.
+You might want to dig deeper - and add your own log messages where you expect or try to find the bug.
+
+To enable logs, you must recompile Unicorn with `-DUNICORN_LOGGING=yes` to cmake.
+
+Logs are written in different log levels, which might result into a very verbose logging if enabled.
+To control the log level information, two environment variables could be used.
+
+`UNICORN_LOG_LEVEL` and `UNICORN_LOG_DETAIL_LEVEL`.
+
+These environment variables are parsed into `uint32_t` values once, (due to performance reasons)
+so set these environment variables before you execute any line of Unicorn.
+Allowed are hexa-decimal, decimal and octal values, which fits into a buffer of 10 chars. (see stroul for details).
+
+To define how detailed and what should be logged, use the following environment variables:
+
+- `UNICORN_LOG_LEVEL`=\<32bit mask\>
+  - The qemu bit mask what should be logged.
+  - Use the value of `UINT32_MAX` to log everything.
+  - If no bit is set in the mask, there will be no logging.
+- `UNICORN_LOG_DETAIL_LEVEL`=\<level\>
+  - The level defines how the filename and line is constructed.
+    - 0: no filename and no line is used.
+    - 1: full filename including the leading path is used with line information.
+    - 2: just the filename with line information. It might be a little confusing,
+    as the file name can be used in several places.
+  - If unsure or unwanted, leave this variable undefined or set it to 0.
+
+As an example to set up the environment for python correctly, see the example below.
+
+```python
+import os
+os.environ['UNICORN_LOG_LEVEL'] = "0xFFFFFFFF" # verbose - print anything 
+os.environ['UNICORN_LOG_DETAIL_LEVEL'] = "1" # full filename with line info
+```
+
+Please note that file names are statically compiled in and can reveal the paths
+of the file system used during compilation.
+
+## Does Unicorn support ARM PAC (Pointer Authentication)?
+
+Yes! However, Unicorn by default disables it and enabling it involves a few coding and document reading.
+
+TLDR:
+
+Taken from [#1789](https://github.com/unicorn-engine/unicorn/issues/1789).
+
+```C
+    uc_arm64_cp_reg reg;
+
+    // SCR_EL3
+    reg.op0 = 0b11;
+    reg.op1 = 0b110;
+    reg.crn = 0b0001;
+    reg.crm = 0b0001;
+    reg.op2 = 0b000;
+
+    err = uc_reg_read(uc, UC_ARM64_REG_CP_REG, &reg);
+    assert(err == UC_ERR_OK);
+
+    // NS && RW && API
+    reg.val |= (1 | (1<<10) | (1<<17));
+
+    err = uc_reg_write(uc, UC_ARM64_REG_CP_REG, &reg);
+    assert(err == UC_ERR_OK);
+
+    // SCTLR_EL1
+    reg.op0 = 0b11;
+    reg.op1 = 0b000;
+    reg.crn = 0b0001;
+    reg.crm = 0b0000;
+    reg.op2 = 0b000;
+
+    err = uc_reg_read(uc, UC_ARM64_REG_CP_REG, &reg);
+    assert(err == UC_ERR_OK);
+
+    // EnIA && EnIB
+    reg.val |= (1<<31) | (1<<30);
+
+    err = uc_reg_write(uc, UC_ARM64_REG_CP_REG, &reg);
+    assert(err == UC_ERR_OK);
+    
+    // HCR_EL2
+    reg.op0 = 0b11;
+    reg.op1 = 0b100;
+    reg.crn = 0b0001;
+    reg.crm = 0b0001;
+    reg.op2 = 0b000;
+
+    // HCR.API
+    reg.val |= (1ULL<<41);
+
+    err = uc_reg_write(uc, UC_ARM64_REG_CP_REG, &reg);
+    assert(err == UC_ERR_OK);
+```
+
+For further explanation, refer to related ARM documents. Here is an incomplete list:
+
+- [System register control of pointer authentication](https://developer.arm.com/documentation/ddi0487/latest/)
+- [EnIA & EnIB](https://developer.arm.com/documentation/ddi0595/2021-12/AArch64-Registers/SCTLR-EL1--System-Control-Register--EL1-?lang=en#fieldset_0-31_31-1)
+- [HCR.API](https://developer.arm.com/documentation/ddi0601/2020-12/AArch64-Registers/HCR-EL2--Hypervisor-Configuration-Register?lang=en#fieldset_0-41_41-1)
+Note you could find the definitions of these registers at the end of corresponding documents.
+
+## I debug my application but soon get an access violation inside unicorn.
+
+This is intended for Windows. See discussion in [#1841](https://github.com/unicorn-engine/unicorn/issues/1841).
+
+## My code does not do what I would expect - is this a bug?
+
+Please create a github issue and provide as many details as possible.
+
+- [ ] Simplified version of your script / source
+  - Make sure that "no" external dependencies are needed.
+  - E.g. remove additional use of capstone or CTF tools.
+- [ ] Used Unicorn git-hash commit
+  - Make sure to exclude any changes of you made in unicorn.
+  - Alternativily provide the repo link to your commit.
+- [ ] Detailed explaination what is expected
+  - Try to verify if the instructions can be processed by qemu.
+  - Dumping the registers of unicorn and qemu helps a lot.
+- [ ] Detailed explaination what is observed
+  - Describe what's going on (and what you might think about it).
+- [ ] Output from your executed script
+  - You might have additional log messages which could be helpful.
+- [ ] Output from the qemu-logs
+  - Try to gather more informations by enabling the qemu logging.
+- [ ] More details
+  - Attach more details to help reproduce the bug.
+  - Like attaching a repo link to the CTF challenge containing the binary or source code.
 
 ## I'd like to make contributions, where do I start?
 

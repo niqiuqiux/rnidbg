@@ -78,7 +78,14 @@ uc_err reg_read(void *_env, int mode, unsigned int regid, void *value,
         CHECK_REG_TYPE(uint32_t);
         *(uint32_t *)value = env->regwptr[8 + regid - UC_SPARC_REG_L0];
     } else if (regid >= UC_SPARC_REG_I0 && regid <= UC_SPARC_REG_I7) {
+        CHECK_REG_TYPE(uint32_t);
         *(uint32_t *)value = env->regwptr[16 + regid - UC_SPARC_REG_I0];
+    } else if (regid == UC_SPARC_REG_PSR) {
+        CHECK_REG_TYPE(uint32_t);
+        if (env->cc_op != CC_OP_FLAGS) {
+            cpu_get_psr(env);
+        }
+        *(uint32_t *)value = env->psr;
     } else {
         switch (regid) {
         default:
@@ -90,6 +97,7 @@ uc_err reg_read(void *_env, int mode, unsigned int regid, void *value,
         }
     }
 
+    CHECK_RET_DEPRECATE(ret, regid);
     return ret;
 }
 
@@ -112,6 +120,10 @@ uc_err reg_write(void *_env, int mode, unsigned int regid, const void *value,
     } else if (regid >= UC_SPARC_REG_I0 && regid <= UC_SPARC_REG_I7) {
         CHECK_REG_TYPE(uint32_t);
         env->regwptr[16 + regid - UC_SPARC_REG_I0] = *(uint32_t *)value;
+    } else if (regid == UC_SPARC_REG_PSR) {
+        CHECK_REG_TYPE(uint32_t);
+        env->psr = *(uint32_t *)value;
+        cpu_put_psr(env, env->psr);
     } else {
         switch (regid) {
         default:
@@ -125,6 +137,7 @@ uc_err reg_write(void *_env, int mode, unsigned int regid, const void *value,
         }
     }
 
+    CHECK_RET_DEPRECATE(ret, regid);
     return ret;
 }
 

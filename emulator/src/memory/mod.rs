@@ -157,6 +157,9 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
 
             m.call_init_functions(force_call, emulator)?;
             m.init_function_list.clear();
+            if emulator.last_exit_status().is_some() {
+                break;
+            }
         }
         unsafe {
             (&*module.get()).ref_cnt.fetch_add(1, Ordering::SeqCst);
@@ -309,6 +312,9 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
                         _ => return Err(anyhow!("ph.data is not PtLoad"))
                     };
                     load_data.write_to(begin, &self.backend);
+                    if prot & Permission::EXEC.bits() != 0 {
+                        neutralize_pac_bti(&self.backend, begin, load_data.buffer.len());
+                    }
                     if let Some(last_align) = last_alignment.as_mut() {
                         last_align.data_size = load_data.buffer.len() as u64;
                     }
@@ -343,10 +349,38 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
         }
 
         if dynamic_structure.is_none() {
-            return Err(anyhow!("dynamic_structure is none"));
+            // Static ET_EXEC / no PT_DYNAMIC: map the image and run its entry.
+            let so_name = library_file.name();
+            if load_virtual_address == 0 {
+                return Err(anyhow!("load_virtual_address is 0"));
+            }
+            let mut module = LinuxModule::new(
+                load_virtual_address,
+                load_base,
+                size,
+                so_name.clone(),
+                None,
+                Vec::new(),
+                VecDeque::new(),
+                IndexMap::new(),
+                regions,
+                arm_ex_idx,
+                eh_frame_header,
+                None,
+                Some(elf_file_cell.clone()),
+                None,
+            );
+            module.entry_point = elf_file.entry_point as u64;
+            info!("loaded static executable {} entry=0x{:x}", so_name, module.entry_point);
+            let module = Rc::new(UnsafeCell::new(module));
+            self.modules.insert(so_name, module.clone());
+            return Ok(module);
         }
 
         let dynamic_structure = dynamic_structure.unwrap();
+        if dynamic_structure.relr_size > 0 && dynamic_structure.relr_offset > 0 {
+            self.apply_relr(load_base, dynamic_structure.relr_offset as u64, dynamic_structure.relr_size)?;
+        }
         let so_name = dynamic_structure.so_name(library_file.name())?;
 
         let mut needed_libraries = IndexMap::new();
@@ -433,6 +467,15 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
                     } else {
                         resolved_symbols.push(module_symbol.unwrap());
                     }
+                }
+                R_AARCH64_IRELATIVE => {
+                    let resolver = load_base + relocation.addend as u64;
+                    let resolved = emulator.resolve_gnu_ifunc(resolver);
+                    relocation_addr.write_u64(resolved)?;
+                }
+                R_AARCH64_TLS_TPREL => {
+                    let tprel = symbol.as_ref().map(|s| s.value as i64).unwrap_or(0) + relocation.addend;
+                    relocation_addr.write_u64(tprel as u64)?;
                 }
                 R_AARCH64_COPY => {
                     panic!("R_AARCH64_COPY relocations are not supported")
@@ -576,6 +619,17 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
 
         if let Some(symbol) = symbol {
             if !symbol.is_undefined() {
+                if symbol.is_gnu_ifunc() {
+                    let impl_addr = emulator.resolve_gnu_ifunc(load_base + symbol.value as u64);
+                    return Ok(ModuleSymbol::new(
+                        so_name.to_string(),
+                        WEAK_BASE,
+                        Some(symbol.clone()),
+                        relocation_addr.addr,
+                        so_name.to_string(),
+                        impl_addr,
+                    ));
+                }
                 let symbol_name = symbol.name(elf_file)?;
 
                 let hash = tool::calculate_hash(&format!("{}#{}", so_name, symbol_name));
@@ -616,6 +670,36 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
         }
 
         alignment
+    }
+
+    fn apply_relr(&self, load_base: u64, relr_vaddr: u64, relr_size: u32) -> anyhow::Result<()> {
+        let table = load_base + relr_vaddr;
+        let count = (relr_size as usize) / 8;
+        let mut where_ptr: u64 = 0;
+        for i in 0..count {
+            let entry = self.backend.mem_read_u64(table + (i as u64) * 8)?;
+            if entry & 1 == 0 {
+                where_ptr = load_base + entry;
+                let val = self.backend.mem_read_u64(where_ptr).unwrap_or(0).wrapping_add(load_base);
+                self.backend.mem_write(where_ptr, &val.to_le_bytes())?;
+                where_ptr += 8;
+            } else {
+                let mut bitmap = entry;
+                let mut idx = 0u64;
+                bitmap >>= 1;
+                while bitmap != 0 {
+                    if bitmap & 1 != 0 {
+                        let loc = where_ptr + idx * 8;
+                        let val = self.backend.mem_read_u64(loc).unwrap_or(0).wrapping_add(load_base);
+                        self.backend.mem_write(loc, &val.to_le_bytes())?;
+                    }
+                    bitmap >>= 1;
+                    idx += 1;
+                }
+                where_ptr += 8 * 63;
+            }
+        }
+        Ok(())
     }
 
     pub fn add_hook_listeners(&mut self, listener: Box<dyn HookListener<'a, T>>) {
@@ -668,9 +752,14 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
         const AT_RANDOM: u64 = 25; // AT_RANDOM is a pointer to 16 bytes of randomness on the stack.
         auxv.write_u64_with_offset(0, AT_RANDOM)?;
         auxv.write_u64_with_offset(8, __stack_chk_guard.addr)?;
-        const  AT_PAGESZ: u64 = 6;
+        const AT_PAGESZ: u64 = 6;
         auxv.write_u64_with_offset(8 * 2, AT_PAGESZ)?;
         auxv.write_u64_with_offset(8 * 3, PAGE_ALIGN as u64)?;
+        const AT_HWCAP: u64 = 16;
+        auxv.write_u64_with_offset(8 * 4, AT_HWCAP)?;
+        auxv.write_u64_with_offset(8 * 5, crate::android::sdk::GUEST_HWCAP)?;
+        auxv.write_u64_with_offset(8 * 6, 0)?;
+        auxv.write_u64_with_offset(8 * 7, 0)?;
 
         let envs = vec![
             "ANDROID_DATA=/data",
@@ -697,6 +786,10 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
         tls.write_u64_with_offset(8, thread.addr).unwrap();
         let errno = tls.share(8 * 2);
         tls.write_u64_with_offset(8 * 3, argv.addr).unwrap();
+        // TLS_SLOT_STACK_GUARD = 5. libc preinit copies this into __stack_chk_guard.
+        const STACK_CANARY: u64 = 0xa5a5_a5a5_a5a5_a5a5;
+        __stack_chk_guard.write_u64(STACK_CANARY)?;
+        tls.write_u64_with_offset(8 * 5, STACK_CANARY).unwrap();
 
         self.backend.reg_write(RegisterARM64::TPIDR_EL0, tls.addr)
             .map_err(|e| anyhow!("init tls failed: {:?}", e))?;
@@ -712,6 +805,38 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
         let tls = VMPointer::new(self.backend.reg_read(RegisterARM64::TPIDR_EL0).unwrap(), 0, self.backend.clone());
         let argv = self.environ.share_with_size(-8 * 2, 0);
         tls.write_u64_with_offset(8 * 3, argv.addr).unwrap();
+    }
+}
+
+/// Replace PAC/BTI HINT encodings with `nop`. Dynarmic has no PAC/BTI and
+/// hits `InterpreterFallback` → host abort on Android 16 CRT (`paciasp`, `bti`).
+fn neutralize_pac_bti<T: Clone>(backend: &Backend<T>, addr: u64, size: usize) {
+    const NOP: u32 = 0xd503201f;
+    const HINT_MASK: u32 = 0xfffff01f;
+    let size = size & !3;
+    if size == 0 {
+        return;
+    }
+    let mut buf = vec![0u8; size];
+    if backend.mem_read(addr, &mut buf).is_err() {
+        return;
+    }
+    let mut n = 0u32;
+    for i in (0..size).step_by(4) {
+        let insn = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+        if insn & HINT_MASK != NOP {
+            continue;
+        }
+        let crm = (insn >> 8) & 0xf;
+        // CRm 2/3 = PAC/AUT, CRm 4 = BTI
+        if crm >= 2 && crm <= 4 && insn != NOP {
+            buf[i..i + 4].copy_from_slice(&NOP.to_le_bytes());
+            n += 1;
+        }
+    }
+    if n > 0 {
+        let _ = backend.mem_write(addr, &buf);
+        info!("neutralized {n} PAC/BTI hints at 0x{addr:X}");
     }
 }
 

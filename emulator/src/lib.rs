@@ -9,3 +9,4 @@ pub(crate) mod elf;
 mod backend;
 
 pub use emulator::AndroidEmulator;
+pub use linux::LinuxModule;

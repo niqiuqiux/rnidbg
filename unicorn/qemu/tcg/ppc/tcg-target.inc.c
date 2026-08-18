@@ -2014,7 +2014,8 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
     MemOp opc = get_memop(oi);
     TCGReg hi, lo, arg = TCG_REG_R3;
 
-    if (!reloc_pc14(lb->label_ptr[0], s->code_ptr)) {
+    const int type = tcg_uc_has_hookmem(s) ? R_PPC_REL24 : R_PPC_REL14;
+    if (!patch_reloc(lb->label_ptr[0], type, (intptr_t)s->code_ptr, 0)) {
         return false;
     }
 
@@ -2062,7 +2063,8 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
     MemOp s_bits = opc & MO_SIZE;
     TCGReg hi, lo, arg = TCG_REG_R3;
 
-    if (!reloc_pc14(lb->label_ptr[0], s->code_ptr)) {
+    const int type = tcg_uc_has_hookmem(s) ? R_PPC_REL24 : R_PPC_REL14;
+    if (!patch_reloc(lb->label_ptr[0], type, (intptr_t)s->code_ptr, 0)) {
         return false;
     }
 
@@ -2142,7 +2144,11 @@ static void tcg_out_qemu_ld(TCGContext *s, const TCGArg *args, bool is_64)
 
     /* Load a pointer into the current opcode w/conditional branch-link. */
     label_ptr = s->code_ptr;
-    tcg_out32(s, BC | BI(7, CR_EQ) | BO_COND_FALSE | LK);
+    // Unicorn: fast path if hookmem is not enabled
+    if (!tcg_uc_has_hookmem(s))
+        tcg_out32(s, BC | BI(7, CR_EQ) | BO_COND_FALSE | LK);
+    else
+        tcg_out32(s, B | LK);
 
     rbase = TCG_REG_R3;
 #else  /* !CONFIG_SOFTMMU */
@@ -2217,7 +2223,11 @@ static void tcg_out_qemu_st(TCGContext *s, const TCGArg *args, bool is_64)
 
     /* Load a pointer into the current opcode w/conditional branch-link. */
     label_ptr = s->code_ptr;
-    tcg_out32(s, BC | BI(7, CR_EQ) | BO_COND_FALSE | LK);
+    // Unicorn: fast path if hookmem is not enabled
+    if (!tcg_uc_has_hookmem(s))
+        tcg_out32(s, BC | BI(7, CR_EQ) | BO_COND_FALSE | LK);
+    else
+        tcg_out32(s, B | LK);
 
     rbase = TCG_REG_R3;
 #else  /* !CONFIG_SOFTMMU */
@@ -2332,13 +2342,6 @@ static void tcg_target_qemu_prologue(TCGContext *s)
                    TCG_REG_R1, REG_SAVE_BOT + i * SZR);
     }
     tcg_out_st(s, TCG_TYPE_PTR, TCG_REG_R0, TCG_REG_R1, FRAME_SIZE+LR_OFFSET);
-
-#ifndef CONFIG_SOFTMMU
-    if (guest_base) {
-        tcg_out_movi_int(s, TCG_TYPE_PTR, TCG_GUEST_BASE_REG, guest_base, true);
-        tcg_regset_set_reg(s->reserved_regs, TCG_GUEST_BASE_REG);
-    }
-#endif
 
     tcg_out_mov(s, TCG_TYPE_PTR, TCG_AREG0, tcg_target_call_iarg_regs[0]);
     tcg_out32(s, MTSPR | RS(tcg_target_call_iarg_regs[1]) | CTR);

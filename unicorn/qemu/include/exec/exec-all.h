@@ -464,6 +464,7 @@ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, target_ulong addr,
                                         void **hostp);
 
 void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length);
+void tlb_reset_dirty_by_vaddr(CPUState *cpu, target_ulong start1, target_ulong length);
 void tlb_set_dirty(CPUState *cpu, target_ulong vaddr);
 
 /* exec.c */
@@ -475,5 +476,28 @@ address_space_translate_for_iotlb(CPUState *cpu, int asidx, hwaddr addr,
                                   MemTxAttrs attrs, int *prot);
 hwaddr memory_region_section_get_iotlb(CPUState *cpu,
                                        MemoryRegionSection *section);
+
+static inline bool uc_mem_hook_installed(struct uc_struct *uc, hwaddr paddr)
+{
+    if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_FETCH_UNMAPPED, paddr))
+        return true;
+    if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_READ_UNMAPPED, paddr))
+        return true;
+    if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_READ, paddr))
+        return true;
+    if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_READ_PROT, paddr))
+        return true;
+    if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_FETCH_PROT, paddr))
+        return true;
+    if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_READ_AFTER, paddr))
+        return true;
+    if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_WRITE, paddr))
+        return true;
+    if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_WRITE_UNMAPPED, paddr))
+        return true;
+    if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_WRITE_PROT, paddr))
+        return true;
+    return false;
+}
 
 #endif

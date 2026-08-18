@@ -4,6 +4,7 @@
 #ifndef UNICORN_ARCH_POSTFIX
 #define UNICORN_ARCH_POSTFIX _aarch64
 #endif
+#define gen_helper_check_exit_request gen_helper_check_exit_request_aarch64
 #define unicorn_fill_tlb unicorn_fill_tlb_aarch64
 #define reg_read reg_read_aarch64
 #define reg_write reg_write_aarch64
@@ -54,6 +55,7 @@
 #define vm_start vm_start_aarch64
 #define address_space_dispatch_compact address_space_dispatch_compact_aarch64
 #define flatview_translate flatview_translate_aarch64
+#define flatview_copy flatview_copy_aarch64
 #define address_space_translate_for_iotlb address_space_translate_for_iotlb_aarch64
 #define qemu_get_cpu qemu_get_cpu_aarch64
 #define cpu_address_space_init cpu_address_space_init_aarch64
@@ -90,6 +92,7 @@
 #define iotlb_to_section iotlb_to_section_aarch64
 #define address_space_dispatch_new address_space_dispatch_new_aarch64
 #define address_space_dispatch_free address_space_dispatch_free_aarch64
+#define address_space_dispatch_clear address_space_dispatch_clear_aarch64
 #define flatview_read_continue flatview_read_continue_aarch64
 #define address_space_read_full address_space_read_full_aarch64
 #define address_space_write address_space_write_aarch64
@@ -794,6 +797,7 @@
 #define get_page_addr_code get_page_addr_code_aarch64
 #define probe_access probe_access_aarch64
 #define tlb_vaddr_to_host tlb_vaddr_to_host_aarch64
+#define tlb_vaddr_to_paddr tlb_vaddr_to_paddr_aarch64
 #define helper_ret_ldub_mmu helper_ret_ldub_mmu_aarch64
 #define helper_le_lduw_mmu helper_le_lduw_mmu_aarch64
 #define helper_be_lduw_mmu helper_be_lduw_mmu_aarch64
@@ -1287,6 +1291,9 @@
 #define gen_helper_vfp_set_fpscr gen_helper_vfp_set_fpscr_aarch64
 #define gen_helper_cpsr_read gen_helper_cpsr_read_aarch64
 #define gen_helper_cpsr_write gen_helper_cpsr_write_aarch64
+#define tlb_reset_dirty_by_vaddr tlb_reset_dirty_by_vaddr_aarch64
+#define helper_stqcx_le_parallel helper_stqcx_le_parallel_aarch64
+#define helper_stqcx_be_parallel helper_stqcx_be_parallel_aarch64
 #define cpu_aarch64_init cpu_aarch64_init_aarch64
 #define arm_cpu_exec_interrupt arm_cpu_exec_interrupt_aarch64
 #define arm_cpu_update_virq arm_cpu_update_virq_aarch64

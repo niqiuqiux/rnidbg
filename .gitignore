@@ -1,5 +1,7 @@
 # Ignore compiled output
 /target/
+emulator/target/
+emulator/Cargo.lock
 
 # Ignore editor and IDE files
 .vscode/
@@ -7,3 +9,13 @@
 
 # Ignore build artifacts
 Cargo.lock
+
+# IDA / reverse-engineering sidecars (not runtime)
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+*.imcp
+*.idb

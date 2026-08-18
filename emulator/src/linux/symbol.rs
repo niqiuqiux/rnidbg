@@ -98,6 +98,10 @@ impl ModuleSymbol {
                             }
                         }
 
+                        if elf_symbol.is_gnu_ifunc() {
+                            let impl_addr = emulator.resolve_gnu_ifunc(module.base + elf_symbol.value as u64);
+                            return Ok(ModuleSymbol::new(self.so_name.clone(), WEAK_BASE, Some(elf_symbol.clone()), self.relocation_addr, module.name.clone(), impl_addr));
+                        }
                         return Ok(ModuleSymbol::new(self.so_name.clone(), module.base as i64, Some(elf_symbol.clone()), self.relocation_addr, module.name.clone(), self.offset))
                     }
                 }

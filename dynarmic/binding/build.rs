@@ -82,34 +82,57 @@ fn build_with_cmake() {
         config.generator("Ninja");
     }
 
+    // Prefer in-tree fmt/mcl/xbyak/zydis so a host install is not required.
+    config.define("DYNARMIC_USE_BUNDLED_EXTERNALS", "ON");
+    if let Ok(boost_inc) = env::var("BOOST_INCLUDEDIR").or_else(|_| env::var("BOOST_ROOT")) {
+        config.define("Boost_INCLUDE_DIR", boost_inc);
+    } else {
+        let vcpkg_boost = PathBuf::from(r"C:\vcpkg\installed\x64-windows\include");
+        if vcpkg_boost.join("boost").is_dir() {
+            config.define("Boost_INCLUDE_DIR", vcpkg_boost);
+        }
+    }
+
     let dst = config
         .no_build_target(true)
         .define("BUILD_TESTING", "OFF")
         .define("MASTER_PROJECT", "OFF")
-        .define("DYNARMIC_USE_BUNDLED_EXTERNALS", "OFF")
+        .define("DYNARMIC_TESTS", "OFF")
+        .define("DYNARMIC_WARNINGS_AS_ERRORS", "OFF")
         .define("DYNARMIC_USE_LLVM", "OFF")
+        .define("DYNARMIC_FRONTENDS", "A64")
         .define("CMAKE_BUILD_TYPE", "Release")
         .build();
-    println!(
-        "cargo:rustc-link-search=native={}",
-        dst.join("build").display()
-    );
+    let build = dst.join("build");
+    for sub in [
+        build.clone(),
+        build.join("src").join("dynarmic"),
+        build.join("externals").join("fmt"),
+        build.join("externals").join("mcl").join("src"),
+        build.join("externals").join("zydis"),
+        build.join("externals").join("zydis").join("zycore"),
+    ] {
+        println!("cargo:rustc-link-search=native={}", sub.display());
+    }
 
     // Lazymio(@wtdcode): Dynamic link may break. See: https://github.com/rust-lang/cargo/issues/5077
     println!("cargo:rustc-link-lib=static=dynarmic");
+    println!("cargo:rustc-link-lib=static=fmt");
+    println!("cargo:rustc-link-lib=static=mcl");
+    if cfg!(target_arch = "x86_64") {
+        println!("cargo:rustc-link-lib=static=Zydis");
+        println!("cargo:rustc-link-lib=static=Zycore");
+    }
     if !compiler.is_like_msvc() {
         println!("cargo:rustc-link-lib=pthread");
         println!("cargo:rustc-link-lib=m");
-        println!("cargo:rustc-link-lib=fmt");
-
-        // if is x86_64
-        if cfg!(target_arch = "x86_64") {
-            println!("cargo:rustc-link-lib=Zydis");
-        }
     }
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/dynarmic/dynarmic.cpp");
+    println!("cargo:rerun-if-changed=src/dynarmic/dynarmic.h");
+    println!("cargo:rerun-if-changed=CMakeLists.txt");
     match pkg_config::Config::new()
         .atleast_version("2")
         .cargo_metadata(false)

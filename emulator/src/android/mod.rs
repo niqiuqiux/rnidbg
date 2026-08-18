@@ -5,6 +5,7 @@ use crate::emulator::{AndroidEmulator, syscall_handler};
 pub mod dvm;
 pub mod virtual_library;
 pub mod jni;
+pub mod sdk;
 mod structs;
 
 impl<T: Clone> AndroidEmulator<'_, T> {

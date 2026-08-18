@@ -5,7 +5,7 @@ use std::rc::Rc;
 use log::{debug, error, warn};
 use crate::emulator::AndroidEmulator;
 use crate::emulator::signal::{SignalOps, ISignalTask, SigSet, UnixSigSet, SavableSignalTask, SignalTask};
-use crate::emulator::thread::{AbstractTask, BaseThreadTask, CoveredTaskSignalOps, LuoTask, RunnableTask, Task, TaskStatus};
+use crate::emulator::thread::{AbstractTask, BaseThreadTask, CoveredTaskSignalOps, LuoTask, RunnableTask, Task, TaskStatus, Waiter};
 
 pub type SavableTask<'a, T> = Rc<UnsafeCell<Box<dyn LuoTask<'a, T>>>>;
 
@@ -70,6 +70,61 @@ impl<'a, T: Clone> UniThreadDispatcher<'a, T> {
         unsafe { &mut *self.running_task.get() }
     }
 
+    fn snapshot_all_tasks(&self) -> Vec<Rc<UnsafeCell<AbstractTask<'a, T>>>> {
+        let mut cells = Vec::with_capacity(self.task_list().len() + self.thread_task().len());
+        cells.extend(self.task_list().iter().cloned());
+        cells.extend(self.thread_task().iter().cloned());
+        cells
+    }
+
+    pub fn wake_futex(&self, uaddr: u64, max: u32) -> u32 {
+        let mut count = 0u32;
+        for cell in self.snapshot_all_tasks() {
+            if count >= max {
+                break;
+            }
+            let woken = match unsafe { &mut *cell.get() } {
+                AbstractTask::Function64(task) => Self::wake_waiter(task.get_waiter(), uaddr),
+                AbstractTask::MarshmallowThread(task) => Self::wake_waiter(task.get_waiter(), uaddr),
+                AbstractTask::SignalTask(task) => Self::wake_waiter(task.get_waiter(), uaddr),
+                AbstractTask::KitKatThread(_) => false,
+            };
+            if woken {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn wake_waiter(waiter: Option<&mut Waiter<'a, T>>, uaddr: u64) -> bool {
+        match waiter {
+            Some(Waiter::FutexIndefinite(w)) => w.wake_up(uaddr),
+            Some(Waiter::FutexNanoSleep(w)) => w.wake_up(uaddr),
+            _ => false,
+        }
+    }
+
+    fn release_deadlocked_waiters(&self) -> u32 {
+        let mut n = 0u32;
+        for cell in self.snapshot_all_tasks() {
+            let waiter = match unsafe { &mut *cell.get() } {
+                AbstractTask::Function64(task) => task.get_waiter(),
+                AbstractTask::MarshmallowThread(task) => task.get_waiter(),
+                AbstractTask::SignalTask(task) => task.get_waiter(),
+                AbstractTask::KitKatThread(_) => None,
+            };
+            let released = match waiter {
+                Some(Waiter::FutexIndefinite(w)) => w.release_for_deadlock(),
+                Some(Waiter::FutexNanoSleep(w)) => w.release_for_deadlock(),
+                _ => false,
+            };
+            if released {
+                n += 1;
+            }
+        }
+        n
+    }
+
     pub fn run_thread(&self, emulator: AndroidEmulator<'a, T>) -> anyhow::Result<()> {
         let mut context = emulator.backend.context_alloc()?;
         emulator.backend.context_save(&mut context)?;
@@ -81,28 +136,27 @@ impl<'a, T: Clone> UniThreadDispatcher<'a, T> {
     fn run(&self, emulator: AndroidEmulator<'a, T>, timeout_sec: u64) -> anyhow::Result<Option<u64>> {
         let start = std::time::Instant::now();
         loop {
-            if self.task_list_mut().is_empty() {
+            if self.task_list().is_empty() {
                 break Ok(None)
             }
 
+            // Snapshot first so syscalls (clone/futex) never alias the live deque.
+            let scheduled: Vec<_> = self.task_list().iter().cloned().collect();
             let mut main_ret = None;
             let mut is_main_finish = false;
             let mut run_task_count = 0;
-            self.task_list_mut().retain(|task_cell| {
+            let mut kept = VecDeque::new();
+
+            for task_cell in scheduled {
                 if is_main_finish {
-                    return true
+                    kept.push_back(task_cell);
+                    continue;
                 }
-                match unsafe { &mut *task_cell.get() } {
+                let keep = match unsafe { &mut *task_cell.get() } {
                     AbstractTask::Function64(function64) => {
                         if function64.is_finish() {
-                            return true
-                        }
-
-                        if option_env!("EMU_LOG") == Some("1") {
-                            debug!("thread dispatcher: function64 can dispatch");
-                        }
-
-                        if function64.can_dispatch() {
+                            true
+                        } else if function64.can_dispatch() {
                             run_task_count += 1;
                             emulator.inner_mut().context_task = Some(task_cell.clone());
 
@@ -142,51 +196,33 @@ impl<'a, T: Clone> UniThreadDispatcher<'a, T> {
                             unsafe {
                                 *self.running_task.get() = Some(task_cell.clone());
                             }
-                            if let Ok(ret) = function64.dispatch(&emulator) {
-                                if let Some(ret) = ret {
-                                    if option_env!("EMU_LOG") == Some("1") {
-                                        println!("thread dispatcher: function64 finish, ret: {:#x}", ret);
-                                    }
+                            match function64.dispatch(&emulator) {
+                                Ok(Some(ret)) => {
                                     function64.set_result(&emulator, ret);
                                     function64.destroy(&emulator);
-
                                     if function64.is_main_thread() {
                                         is_main_finish = true;
                                         main_ret = Some(ret);
                                     }
-
-                                    return false
-                                } else {
-                                    if option_env!("EMU_LOG") == Some("1") {
-                                        println!("thread dispatcher: function64 save context");
-                                    }
+                                    false
+                                }
+                                _ => {
                                     function64.save_context(&emulator);
+                                    true
                                 }
-                            } else {
-                                if option_env!("EMU_LOG") == Some("1") {
-                                    println!("thread dispatcher: function64 save context");
-                                }
-                                function64.save_context(&emulator);
                             }
+                        } else {
+                            true
                         }
                     }
                     AbstractTask::MarshmallowThread(thread_task) => {
                         if thread_task.is_finish() {
-                            return true
-                        }
-
-                        if option_env!("EMU_LOG") == Some("1") {
-                            println!("thread dispatcher: thread task can dispatch: {}", thread_task.can_dispatch());
-                        }
-
-                        if thread_task.can_dispatch() {
+                            true
+                        } else if thread_task.can_dispatch() {
                             run_task_count += 1;
                             emulator.inner_mut().context_task = Some(task_cell.clone());
 
                             if thread_task.is_context_saved() {
-                                if option_env!("EMU_LOG") == Some("1") {
-                                    println!("thread dispatcher: thread task restore context");
-                                }
                                 thread_task.restore_context(&emulator);
 
                                 let mut need_remove_signal_task = vec![];
@@ -222,41 +258,34 @@ impl<'a, T: Clone> UniThreadDispatcher<'a, T> {
                             unsafe {
                                 *self.running_task.get() = Some(task_cell.clone());
                             }
-                            if let Ok(ret) = thread_task.dispatch(&emulator) {
-                                if let Some(ret) = ret {
-                                    if option_env!("EMU_LOG") == Some("1") {
-                                        println!("thread dispatcher: thread task finish, ret: {:#x}", ret);
-                                    }
+                            match thread_task.dispatch(&emulator) {
+                                Ok(Some(ret)) => {
                                     thread_task.set_result(&emulator, ret);
                                     thread_task.destroy(&emulator);
-
                                     if thread_task.is_main_thread() {
                                         is_main_finish = true;
                                         main_ret = Some(ret);
                                     }
-
-                                    return false
-                                } else {
-                                    if option_env!("EMU_LOG") == Some("1") {
-                                        println!("thread dispatcher: thread task save context, not ret");
-                                    }
+                                    false
+                                }
+                                _ => {
                                     thread_task.save_context(&emulator);
+                                    true
                                 }
-                            } else {
-                                if option_env!("EMU_LOG") == Some("1") {
-                                    println!("thread dispatcher: thread task save context, can't dispatch");
-                                }
-                                thread_task.save_context(&emulator);
                             }
+                        } else {
+                            true
                         }
                     }
-                    AbstractTask::SignalTask(_) => {
-                        return false
-                    }
-                    AbstractTask::KitKatThread(_) => { panic!("描绘的未来没了以后") }
+                    AbstractTask::SignalTask(_) => false,
+                    AbstractTask::KitKatThread(_) => panic!("描绘的未来没了以后"),
+                };
+                if keep {
+                    kept.push_back(task_cell);
                 }
-                true
-            });
+            }
+
+            *self.task_list_mut() = kept;
 
             if is_main_finish {
                 emulator.inner_mut().context_task = None;
@@ -267,18 +296,21 @@ impl<'a, T: Clone> UniThreadDispatcher<'a, T> {
             }
 
             if run_task_count == 0 {
+                let released = self.release_deadlocked_waiters();
+                if released > 0 {
+                    warn!("thread dispatcher: deadlock, released {released} futex waiter(s)");
+                    continue;
+                }
+                warn!(
+                    "thread dispatcher: no runnable tasks ({} parked)",
+                    self.task_list().len()
+                );
                 break Ok(None)
             }
 
-            if !self.thread_task_mut().is_empty() {
-                let rev_thread_tasks = self.thread_task_mut()
-                    .iter()
-                    .map(|t| t.clone())
-                    .collect::<Vec<_>>();
+            if !self.thread_task().is_empty() {
+                let rev_thread_tasks = self.thread_task().iter().cloned().collect::<Vec<_>>();
                 self.thread_task_mut().clear();
-                if option_env!("EMU_LOG") == Some("1") {
-                    println!("thread dispatcher: add thread task count: {}", rev_thread_tasks.len());
-                }
                 for task_cell in rev_thread_tasks {
                     self.task_list_mut().push_front(task_cell);
                 }
@@ -293,7 +325,7 @@ impl<'a, T: Clone> UniThreadDispatcher<'a, T> {
                 return Ok(None)
             }
 
-            if self.task_list_mut().is_empty() {
+            if self.task_list().is_empty() {
                 emulator.inner_mut().context_task = None;
                 unsafe {
                     *self.running_task.get() = None;
@@ -312,7 +344,7 @@ impl<'a, T: Clone> ThreadDispatcher<'a, T> for UniThreadDispatcher<'a, T> {
     }
 
     fn task_list(&self) -> &VecDeque<Rc<UnsafeCell<AbstractTask<'a, T>>>> {
-        self.task_list_mut()
+        UniThreadDispatcher::task_list(self)
     }
 
     fn run_main_for_result(&self, main_task: AbstractTask<'a, T>, emulator: AndroidEmulator<'a, T>) -> Option<u64> {

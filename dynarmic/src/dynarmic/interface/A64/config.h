@@ -25,51 +25,51 @@ using VAddr = std::uint64_t;
 using Vector = std::array<std::uint64_t, 2>;
 static_assert(sizeof(Vector) == sizeof(std::uint64_t) * 2, "Vector must be 128 bits in size");
 
-enum class Exception: std::uint32_t {
+enum class Exception {
     /// An UndefinedFault occured due to executing instruction with an unallocated encoding
-    UnallocatedEncoding = 0,
+    UnallocatedEncoding,
     /// An UndefinedFault occured due to executing instruction containing a reserved value
-    ReservedValue = 1,
+    ReservedValue,
     /// An unpredictable instruction is to be executed. Implementation-defined behaviour should now happen.
     /// This behaviour is up to the user of this library to define.
     /// Note: Constraints on unpredictable behaviour are specified in the ARMv8 ARM.
-    UnpredictableInstruction = 2,
+    UnpredictableInstruction,
     /// A WFI instruction was executed. You may now enter a low-power state. (Hint instruction.)
-    WaitForInterrupt = 3,
+    WaitForInterrupt,
     /// A WFE instruction was executed. You may now enter a low-power state if the event register is clear. (Hint instruction.)
-    WaitForEvent = 4,
+    WaitForEvent,
     /// A SEV instruction was executed. The event register of all PEs should be set. (Hint instruction.)
-    SendEvent = 5,
+    SendEvent,
     /// A SEVL instruction was executed. The event register of the current PE should be set. (Hint instruction.)
-    SendEventLocal = 6,
+    SendEventLocal,
     /// A YIELD instruction was executed. (Hint instruction.)
-    Yield = 7,
+    Yield,
     /// A BRK instruction was executed. (Hint instruction.)
-    Breakpoint = 8,
+    Breakpoint,
     /// Attempted to execute a code block at an address for which MemoryReadCode returned std::nullopt.
     /// (Intended to be used to emulate memory protection faults.)
-    NoExecuteFault = 9,
+    NoExecuteFault,
 };
 
-enum class DataCacheOperation: std::uint32_t {
+enum class DataCacheOperation {
     /// DC CISW
-    CleanAndInvalidateBySetWay = 0,
+    CleanAndInvalidateBySetWay,
     /// DC CIVAC
-    CleanAndInvalidateByVAToPoC = 1,
+    CleanAndInvalidateByVAToPoC,
     /// DC CSW
-    CleanBySetWay = 2,
+    CleanBySetWay,
     /// DC CVAC
-    CleanByVAToPoC = 3,
+    CleanByVAToPoC,
     /// DC CVAU
-    CleanByVAToPoU = 4,
+    CleanByVAToPoU,
     /// DC CVAP
-    CleanByVAToPoP = 5,
+    CleanByVAToPoP,
     /// DC ISW
-    InvalidateBySetWay = 6,
+    InvalidateBySetWay,
     /// DC IVAC
-    InvalidateByVAToPoC = 7,
+    InvalidateByVAToPoC,
     /// DC ZVA
-    ZeroByVA = 8,
+    ZeroByVA,
 };
 
 enum class InstructionCacheOperation {
@@ -194,7 +194,7 @@ struct UserConfig {
 
     /// Pointer to where TPIDRRO_EL0 is stored. This pointer will be inserted into
     /// emitted code.
-    std::uint64_t* tpidrro_el0 = nullptr;
+    const std::uint64_t* tpidrro_el0 = nullptr;
 
     /// Pointer to where TPIDR_EL0 is stored. This pointer will be inserted into
     /// emitted code.

@@ -65,9 +65,7 @@ public:
         ASSERT(conf.page_table_address_space_bits >= 12 && conf.page_table_address_space_bits <= 64);
     }
 
-    ~Impl() {
-
-    };
+    ~Impl() = default;
 
     HaltReason Run() {
         ASSERT(!is_executing);
@@ -157,34 +155,6 @@ public:
         jit_state.pc = value;
     }
 
-    int SetTPIDRRO_EL0(std::uint64_t value) const {
-        u64* p = conf.tpidrro_el0;
-        if (p) {
-            *p = value;
-        } else {
-            return -1;
-        }
-        return 0;
-    }
-
-    int SetTPIDR_EL0(std::uint64_t value) const {
-        u64* p = conf.tpidr_el0;
-        if (p) {
-            *p = value;
-        } else {
-            return -1;
-        }
-        return 0;
-    }
-
-    u64 GetTPIDR_EL0() const {
-        u64* p = conf.tpidr_el0;
-        if (p) {
-            return *p;
-        }
-        return 0;
-    }
-
     u64 GetRegister(size_t index) const {
         if (index == 31)
             return GetSP();
@@ -224,10 +194,6 @@ public:
     void SetVectors(const std::array<Vector, 32>& value) {
         static_assert(sizeof(value) == sizeof(jit_state.vec));
         std::memcpy(jit_state.vec.data(), value.data(), sizeof(jit_state.vec));
-    }
-
-    void** GetPageTable() const {
-        return conf.page_table;
     }
 
     u32 GetFpcr() const {
@@ -271,6 +237,7 @@ public:
         const size_t size = reinterpret_cast<const char*>(block_of_code.getCurr()) - reinterpret_cast<const char*>(block_of_code.GetCodeBegin());
         return Common::DisassembleX64(block_of_code.GetCodeBegin(), size);
     }
+
 private:
     static CodePtr GetCurrentBlockThunk(void* thisptr) {
         Jit::Impl* this_ = static_cast<Jit::Impl*>(thisptr);
@@ -319,6 +286,7 @@ private:
         if (conf.HasOptimization(OptimizationFlag::MiscIROpt)) {
             Optimization::A64MergeInterpretBlocksPass(ir_block, conf.callbacks);
         }
+        Optimization::IdentityRemovalPass(ir_block);
         Optimization::VerificationPass(ir_block);
         return emitter.Emit(ir_block).entrypoint;
     }
@@ -347,7 +315,6 @@ private:
 
     bool is_executing = false;
 
-public:
     const UserConfig conf;
     A64JitState jit_state;
     BlockOfCode block_of_code;
@@ -357,12 +324,15 @@ public:
     bool invalidate_entire_cache = false;
     boost::icl::interval_set<u64> invalid_cache_ranges;
     std::mutex invalidation_mutex;
+
+public:
+    uint64_t GetCacheSize() const {
+        return block_of_code.getSize();
+    }
 };
 
 Jit::Jit(UserConfig conf)
-        : impl(std::make_unique<Jit::Impl>(this, conf)) {
-
-}
+        : impl(std::make_unique<Jit::Impl>(this, conf)) {}
 
 Jit::~Jit() = default;
 
@@ -375,7 +345,7 @@ HaltReason Jit::Step() {
 }
 
 uint64_t Jit::GetCacheSize() const {
-    return impl->block_of_code.getSize();
+    return impl->GetCacheSize();
 }
 
 void Jit::ClearCache() {
@@ -396,18 +366,6 @@ void Jit::HaltExecution(HaltReason hr) {
 
 void Jit::ClearHalt(HaltReason hr) {
     impl->ClearHalt(hr);
-}
-
-int Jit::SetTPIDRRO_EL0(u64 value) {
-    return impl->SetTPIDRRO_EL0(value);
-}
-
-int Jit::SetTPIDR_EL0(u64 value) {
-    return impl->SetTPIDR_EL0(value);
-}
-
-u64 Jit::GetTPIDR_EL0() {
-    return impl->GetTPIDR_EL0();
 }
 
 u64 Jit::GetSP() const {
@@ -497,11 +455,5 @@ void Jit::DumpDisassembly() const {
 std::vector<std::string> Jit::Disassemble() const {
     return impl->Disassemble();
 }
-
-void **Jit::GetPageTable() const {
-    return impl->GetPageTable();
-}
-
-
 
 }  // namespace Dynarmic::A64

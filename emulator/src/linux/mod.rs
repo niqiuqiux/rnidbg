@@ -10,6 +10,6 @@ pub(crate) mod syscalls;
 mod sock;
 mod pipe;
 
-pub(crate) use module::LinuxModule;
+pub use module::LinuxModule;
 
 pub const PAGE_ALIGN: usize = 0x1000;

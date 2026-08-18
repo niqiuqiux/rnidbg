@@ -1,7 +1,7 @@
 use crate::emulator::AndroidEmulator;
 use crate::pointer::VMPointer;
 use anyhow::anyhow;
-use log::error;
+use log::{error, info};
 use std::marker::PhantomData;
 
 #[derive(Clone)]
@@ -51,20 +51,16 @@ impl<'a, T: Clone> InitFunctionTrait<'a, T> for AbsoluteInitFunction<'a, T> {
             address = self.addr;
         }
 
-        if address == 0 {
-            error!(
-                "[{}] CallInitFunction: address=0x{:X}, ptr={:X}, func={:X}",
-                self.lib_name,
-                address,
-                self.ptr.addr,
-                self.ptr.read_i64_with_offset(0)?
-            );
-            return Ok(address);
+        if address == 0 || address == u64::MAX {
+            return Ok(0);
         }
 
-        //let pointer = VMPointer::new(address, 0, emu.backend.clone());
-        //info!("[{}] CallInitFunction: addr=0x{:X}, offset=0x{:X}", self.lib_name, pointer.addr, address - self.load_base);
-
+        info!(
+            "[{}] CallInitFunction: addr=0x{:X}, offset=0x{:X}",
+            self.lib_name,
+            address,
+            address.saturating_sub(self.load_base)
+        );
         emu.e_func(address, vec![])
             .ok_or(anyhow!("failed to call init function"))
 
@@ -98,13 +94,11 @@ impl<'a, T: Clone> InitFunctionTrait<'a, T> for LinuxInitFunction<'a, T> {
     }
 
     fn call(&self, emu: AndroidEmulator<'a, T>) -> anyhow::Result<u64> {
-        if self.addr == 0 {
-            //debug!("[{}] CallInitFunction: address=0x{:X}", self.lib_name, self.addr);
-            return Ok(self.addr);
+        if self.addr == 0 || self.addr() == u64::MAX {
+            return Ok(0);
         }
 
-        //debug!("[{}] CallInitFunction: addr=0x{:X}", self.lib_name, self.addr);
-
+        info!("[{}] CallInitFunction: addr=0x{:X}", self.lib_name, self.addr());
         emu.e_func(self.addr(), vec![]);
 
         Ok(self.addr)

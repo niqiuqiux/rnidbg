@@ -1,5 +1,9 @@
-TARGET = make_nm normalize_prefix bad_address misc cvt_test cvt_test32 noexception misc32 detect_x32
-XBYAK_INC=../xbyak/xbyak.h ../xbyak/xbyak_mnemonic.h
+# To compile with -m32
+# apt install g++-multilib
+CXX_32 = $(CXX) -m32
+CXX_64 = $(CXX) -m64
+TARGET = make_nm normalize_prefix bad_address misc cvt_test cvt_test32 noexception misc32 detect_x32 avx10_test
+XBYAK_INC=../xbyak/xbyak.h ../xbyak/xbyak_mnemonic.h ../xbyak/xbyak_util.h
 UNAME_S=$(shell uname -s)
 ifeq ($(shell ./detect_x32),x32)
 X32?=1
@@ -22,11 +26,12 @@ endif
 
 ifeq ($(BIT),64)
 	TARGET += jmp64 address64 apx
+	TARGET += sf_test cpumask_test
 endif
 
 all: $(TARGET)
 
-CFLAGS_WARN=-Wall -Wextra -Wformat=2 -Wcast-qual -Wwrite-strings -Wfloat-equal -Wpointer-arith
+CFLAGS_WARN=$(shell cat CFLAGS_WARN.cfg)
 
 CFLAGS=-O2 -Wall -I.. -I. $(CFLAGS_WARN) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) #-std=c++0x
 make_nm:
@@ -36,19 +41,19 @@ normalize_prefix: normalize_prefix.cpp $(XBYAK_INC)
 test_mmx: test_mmx.cpp $(XBYAK_INC)
 	$(CXX) $(CFLAGS) test_mmx.cpp -o $@ -lpthread
 jmp: jmp.cpp $(XBYAK_INC)
-	$(CXX) $(CFLAGS) jmp.cpp -o $@ -m32
+	$(CXX_32) $(CFLAGS) $< -o $@
 jmp64: jmp.cpp $(XBYAK_INC)
-	$(CXX) $(CFLAGS) jmp.cpp -o $@ -m64
+	$(CXX_64) $(CFLAGS) $< -o $@
 address: address.cpp $(XBYAK_INC)
-	$(CXX) $(CFLAGS) address.cpp -o $@ -m32
+	$(CXX_32) $(CFLAGS) $< -o $@
 address64: address.cpp $(XBYAK_INC)
-	$(CXX) $(CFLAGS) address.cpp -o $@ -m64
+	$(CXX_64) $(CFLAGS) $< -o $@
 bad_address: bad_address.cpp $(XBYAK_INC)
-	$(CXX) $(CFLAGS) bad_address.cpp -o $@
+	$(CXX) $(CFLAGS) $< -o $@
 misc: misc.cpp $(XBYAK_INC)
-	$(CXX) $(CFLAGS) misc.cpp -o $@
+	$(CXX) $(CFLAGS) $< -o $@
 misc32: misc.cpp $(XBYAK_INC)
-	$(CXX) $(CFLAGS) misc.cpp -o $@ -DXBYAK32
+	$(CXX) $(CFLAGS) $< -o $@ -DXBYAK32
 cvt_test: cvt_test.cpp $(XBYAK_INC)
 	$(CXX) $(CFLAGS) $< -o $@
 cvt_test32: cvt_test.cpp $(XBYAK_INC)
@@ -56,7 +61,20 @@ cvt_test32: cvt_test.cpp $(XBYAK_INC)
 noexception: noexception.cpp $(XBYAK_INC)
 	$(CXX) $(CFLAGS) $< -o $@ -fno-exceptions
 apx: apx.cpp $(XBYAK_INC)
-	$(CXX) $(CFLAGS) apx.cpp -o $@
+	$(CXX) $(CFLAGS) $< -o $@
+avx10_test: avx10_test.cpp $(XBYAK_INC)
+	$(CXX) $(CFLAGS) $< -o $@ -DXBYAK64
+sf_test: sf_test.cpp $(XBYAK_INC)
+	$(CXX) $(CFLAGS) $< -o $@ -DXBYAK64
+cpumask_test: cpumask_test.cpp $(XBYAK_INC)
+	$(CXX) $(CFLAGS) $< -o $@
+
+TEST_FILES=old.txt bf16.txt comp.txt misc.txt convert.txt minmax.txt saturation.txt apx.txt amx.txt
+xed_test:
+	@set -e; \
+	for target in $(addprefix dataset/, $(TEST_FILES)); do \
+		./test_by_xed.sh $$target || exit 1; \
+	done
 
 test_nm: normalize_prefix $(TARGET)
 	$(MAKE) -C ../gen
@@ -81,6 +99,7 @@ ifneq ($(X32),1)
 endif
 	./jmp64
 	./apx
+	./avx10_test
 endif
 
 test_avx: normalize_prefix
@@ -103,6 +122,9 @@ ifeq ($(BIT),64)
 	CXX=$(CXX) ./test_avx512.sh 64
 endif
 
+test_avx10: avx10_test
+	./avx10_test
+
 detect_x32: detect_x32.c
 	$(CC) $< -o $@
 
@@ -112,7 +134,7 @@ test: detect_x32
 	$(MAKE) test_avx512
 
 clean:
-	$(RM) a.asm *.lst *.obj *.o $(TARGET) lib_run nm.cpp nm_frame make_512
+	$(RM) a.asm *.lst *.obj *.o $(TARGET) lib_run nm.cpp nm_frame make_512 avx10_test detect_x32
 
 lib_run: lib_test.cpp lib_run.cpp lib.h
 	$(CXX) $(CFLAGS) lib_run.cpp lib_test.cpp -o lib_run

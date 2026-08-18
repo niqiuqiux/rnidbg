@@ -10,6 +10,8 @@
 #include "uc_priv.h"
 #include "unicorn_common.h"
 #include "unicorn.h"
+#include "stdio.h"
+#include "inttypes.h"
 
 ARMCPU *cpu_arm_init(struct uc_struct *uc);
 
@@ -350,9 +352,14 @@ uc_err reg_read(void *_env, int mode, unsigned int regid, void *value,
             CHECK_REG_TYPE(uc_arm_cp_reg);
             ret = read_cp_reg(env, (uc_arm_cp_reg *)value);
             break;
+        case UC_ARM_REG_ESR:
+            CHECK_REG_TYPE(uint32_t);
+            *(uint32_t *)value = env->exception.syndrome;
+            break;
         }
     }
 
+    CHECK_RET_DEPRECATE(ret, regid);
     return ret;
 }
 
@@ -430,14 +437,17 @@ uc_err reg_write(void *_env, int mode, unsigned int regid, const void *value,
             CHECK_REG_TYPE(uint32_t);
             env->pc = (*(uint32_t *)value & ~1);
             env->thumb = (*(uint32_t *)value & 1);
-            env->uc->thumb = (*(uint32_t *)value & 1);
+            if (env->uc) {
+                // This can be NULL if env is a context
+                env->uc->thumb = (*(uint32_t *)value & 1);
+            }
             env->regs[15] = (*(uint32_t *)value & ~1);
             *setpc = 1;
             break;
-            // case UC_ARM_REG_C1_C0_2:
-            //     env->cp15.c1_coproc = *(int32_t *)value;
-            //     break;
-
+        case UC_ARM_REG_C1_C0_2:
+            CHECK_REG_TYPE(int32_t);
+            env->cp15.cpacr_el1 = *(int32_t *)value;
+            break;
         case UC_ARM_REG_C13_C0_3:
             CHECK_REG_TYPE(int32_t);
             env->cp15.tpidrro_el[0] = *(int32_t *)value;
@@ -550,9 +560,14 @@ uc_err reg_write(void *_env, int mode, unsigned int regid, const void *value,
             ret = write_cp_reg(env, (uc_arm_cp_reg *)value);
             arm_rebuild_hflags_arm(env);
             break;
+        case UC_ARM_REG_ESR:
+            CHECK_REG_TYPE(uint32_t);
+            env->exception.syndrome = *(uint32_t *)value;
+            break;
         }
     }
 
+    CHECK_RET_DEPRECATE(ret, regid);
     return ret;
 }
 
@@ -750,7 +765,8 @@ static uc_err uc_arm_context_restore(struct uc_struct *uc, uc_context *context)
     ARM_ENV_RESTORE(env->sau.rlar)
 
 #undef ARM_ENV_RESTORE
-
+    // Overwrite uc to our uc
+    env->uc = uc;
     return UC_ERR_OK;
 }
 

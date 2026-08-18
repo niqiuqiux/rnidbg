@@ -1,9 +1,12 @@
 #![allow(non_snake_case)]
 
-use log::debug;
+use log::{debug, warn};
 use SvcCallResult::RET;
 use crate::android::dvm::{*};
 use crate::android::jni::JniValue;
+use crate::backend::RegisterARM64;
+use crate::android::structs::JNINativeMethod;
+use std::mem;
 use crate::dalvik;
 use crate::memory::svc_memory::{SimpleArm64Svc, SvcCallResult, SvcMemory};
 use crate::memory::svc_memory::SvcCallResult::{FUCK, VOID};
@@ -15,7 +18,17 @@ macro_rules! env {
 }
 
 fn NoImplementedHandler<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
-    SvcCallResult::FUCK(anyhow!("Svc({}) No Implemented!", name))
+    warn!("JNI {} is not implemented (lr=0x{:x})", name, emulator.get_lr().unwrap_or(0));
+    let _ = emulator;
+    RET(JNI_ERR)
+}
+
+fn SoftJniZero<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
+    if option_env!("PRINT_JNI_CALLS").unwrap_or("") == "1" {
+        debug!("JNI {}() => 0", name);
+    }
+    let _ = emulator;
+    RET(0)
 }
 
 fn GetVersion<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
@@ -38,7 +51,7 @@ fn FindClass<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResu
         panic!("Invalid class name pointer");
     };
 
-    if let Some(vm) = emulator.inner_mut().dalvik.as_ref() {
+    if let Some(vm) = emulator.inner_mut().dalvik.as_mut() {
         let result = vm.resolve_class(&class_name_str);
         if let Some((id, _)) = result {
             if option_env!("PRINT_JNI_CALLS").unwrap_or("") == "1" {
@@ -54,7 +67,7 @@ fn FindClass<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResu
         warn!("DalvikVM not initialized: Jni::FindClass");
     }
     if let Some(vm) = emulator.inner_mut().dalvik.as_mut() {
-        vm.throw(vm.resolve_class("java/lang/NoClassDefFoundError").unwrap().1.new_simple_instance(dalvik!(emulator)));
+        vm.throw_class("java/lang/NoClassDefFoundError");
     }
     RET(JNI_NULL)
 }
@@ -134,6 +147,58 @@ fn DeleteGlobalRef<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCa
     RET(JNI_OK)
 }
 
+fn NewLocalRef<T: Clone>(_name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
+    let object = emulator.backend.reg_read(RegisterARM64::X1).unwrap() as i64;
+    if object == 0 {
+        return RET(JNI_NULL);
+    }
+    let dvm = dalvik!(emulator);
+    let flag = jni::get_flag_id(object);
+    if flag == JNI_FLAG_CLASS || flag == JNI_FLAG_REF {
+        return RET(object);
+    }
+    if flag == JNI_FLAG_OBJECT {
+        if let Some(obj) = dvm.get_local_ref(object).cloned() {
+            return RET(dvm.add_local_ref(obj));
+        }
+    }
+    RET(JNI_NULL)
+}
+
+fn IsSameObject<T: Clone>(_name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
+    let a = emulator.backend.reg_read(RegisterARM64::X1).unwrap() as i64;
+    let b = emulator.backend.reg_read(RegisterARM64::X2).unwrap() as i64;
+    RET(if a == b { JNI_TRUE } else { JNI_FALSE })
+}
+
+fn AllocObject<T: Clone>(_name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
+    let clz_id = emulator.backend.reg_read(RegisterARM64::X1).unwrap() as i64;
+    let dvm = dalvik!(emulator);
+    let Some((_, class)) = dvm.find_class_by_id(&clz_id) else {
+        return RET(JNI_NULL);
+    };
+    let obj = DvmObject::new_simple(class);
+    RET(dvm.add_local_ref(obj))
+}
+
+fn Throw<T: Clone>(_name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
+    let object = emulator.backend.reg_read(RegisterARM64::X1).unwrap() as i64;
+    let dvm = dalvik!(emulator);
+    if let Some(obj) = dvm.get_local_ref(object).cloned().or_else(|| dvm.get_global_ref(object).cloned()) {
+        dvm.throw(obj);
+        return RET(JNI_OK);
+    }
+    RET(JNI_ERR)
+}
+
+fn ExceptionOccurred<T: Clone>(_name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
+    let dvm = dalvik!(emulator);
+    if let Some(obj) = dvm.throwable.clone() {
+        return RET(dvm.add_local_ref(obj));
+    }
+    RET(JNI_NULL)
+}
+
 fn DeleteLocalRef<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallResult {
     let object = emulator.backend.reg_read(RegisterARM64::X1).unwrap() as i64;
 
@@ -194,7 +259,7 @@ fn NewObjectV<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallRes
         return RET(JNI_NULL)
     }
     let method = method.unwrap();
-    let mut va_list = VaList::new(emulator, args);
+    let mut va_list = VaList::from_jni_style(emulator, name, 3, RegisterARM64::X3);
 
     let result = dalvik!(emulator).jni.as_mut().expect("JNI not register")
         .call_method_v(dalvik!(emulator), MethodAcc::CONSTRUCTOR | MethodAcc::OBJECT, &class, method, None, &mut va_list);
@@ -318,7 +383,7 @@ fn GetMethodID<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallRe
         if option_env!("PRINT_JNI_CALLS").unwrap_or("") == "1" {
             debug!("{} {}(env = 0x{:x}, class = 0x{:x}, name = {}, signature = {}) => NoSuchMethodError", Color::Yellow.paint("JNI:"), Color::Blue.paint("GetMethodID"), env!(emulator), clz_id, method_name, signature);
         }
-        dvm.throw(dvm.resolve_class("java/lang/NoSuchMethodError").unwrap().1.new_simple_instance(dalvik!(emulator)))
+        dvm.throw_class("java/lang/NoSuchMethodError")
     }
 
     RET(JNI_ERR)
@@ -353,7 +418,7 @@ fn CallObjectMethodV<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> Svc
         let class = instance.get_class(dvm_ref);
         let method = dvm_ref.find_method_by_id(class.id, method_id).unwrap();
         dalvik!(emulator).jni.as_mut().expect("JNI not register")
-            .call_method_v(dalvik!(emulator), MethodAcc::OBJECT, &class, method, Some(instance), &mut VaList::new(emulator, args))
+            .call_method_v(dalvik!(emulator), MethodAcc::OBJECT, &class, method, Some(instance), &mut VaList::from_jni_style(emulator, name, 3, RegisterARM64::X3))
     };
 
     if result.is_none() {
@@ -403,7 +468,7 @@ fn CallBooleanMethodV<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> Sv
         let class = instance.get_class(dvm_ref);
         let method = dvm_ref.find_method_by_id(class.id, method_id).unwrap();
         dalvik!(emulator).jni.as_mut().expect("JNI not register")
-            .call_method_v(dalvik!(emulator), MethodAcc::BOOLEAN, &class, method, Some(instance), &mut VaList::new(emulator, args))
+            .call_method_v(dalvik!(emulator), MethodAcc::BOOLEAN, &class, method, Some(instance), &mut VaList::from_jni_style(emulator, name, 3, RegisterARM64::X3))
     };
 
     if result.is_none() {
@@ -449,7 +514,7 @@ fn CallIntMethodV<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCal
         let class = instance.get_class(dvm_ref);
         let method = dvm_ref.find_method_by_id(class.id, method_id).unwrap();
         dalvik!(emulator).jni.as_mut().expect("JNI not register")
-            .call_method_v(dalvik!(emulator), MethodAcc::INT, &class, method, Some(instance), &mut VaList::new(emulator, args))
+            .call_method_v(dalvik!(emulator), MethodAcc::INT, &class, method, Some(instance), &mut VaList::from_jni_style(emulator, name, 3, RegisterARM64::X3))
     };
 
     if result.is_none() {
@@ -495,7 +560,7 @@ fn CallVoidMethodV<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCa
         let class = instance.get_class(dvm_ref);
         let method = dvm_ref.find_method_by_id(class.id, method_id).unwrap();
         dalvik!(emulator).jni.as_mut().expect("JNI not register")
-            .call_method_v(dalvik!(emulator), MethodAcc::VOID, &class, method, Some(instance), &mut VaList::new(emulator, args))
+            .call_method_v(dalvik!(emulator), MethodAcc::VOID, &class, method, Some(instance), &mut VaList::from_jni_style(emulator, name, 3, RegisterARM64::X3))
     };
 
     if result.is_none() {
@@ -580,7 +645,7 @@ fn GetFieldID<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcCallRes
         if option_env!("PRINT_JNI_CALLS").unwrap_or("") == "1" {
             debug!("{} {}(env = 0x{:x}, class = 0x{:x}, name = {}, signature = {}) => NoSuchFieldError", Color::Yellow.paint("JNI:"), Color::Blue.paint("GetFieldID"), env!(emulator), clz_id, field_name, signature);
         }
-        dvm.throw(dvm.resolve_class("java/lang/NoSuchFieldError").unwrap().1.new_simple_instance(dalvik!(emulator)))
+        dvm.throw_class("java/lang/NoSuchFieldError")
     }
 
     RET(JNI_NULL)
@@ -796,7 +861,7 @@ fn GetStaticMethodID<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> Svc
         if option_env!("PRINT_JNI_CALLS").unwrap_or("") == "1" {
             debug!("{} {}(env = 0x{:x}, class = 0x{:x}, name = {}, signature = {}) => NoSuchMethodError", Color::Yellow.paint("JNI:"), Color::Blue.paint("GetStaticMethodID"), env!(emulator), clz_id, method_name, signature);
         }
-        dvm.throw(dvm.resolve_class("java/lang/NoSuchMethodError").unwrap().1.new_simple_instance(dalvik!(emulator)))
+        dvm.throw_class("java/lang/NoSuchMethodError")
     }
 
     RET(JNI_NULL)
@@ -848,7 +913,7 @@ fn CallStaticObjectMethodV<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) 
     }
     let method = method.unwrap();
 
-    let mut va_list = VaList::new(emulator, args);
+    let mut va_list = VaList::from_jni_style(emulator, name, 3, RegisterARM64::X3);
     let result = dalvik!(emulator).jni.as_mut().expect("JNI not register")
         .call_method_v(dalvik!(emulator), MethodAcc::STATIC | MethodAcc::OBJECT, &class, method, None, &mut va_list);
 
@@ -913,7 +978,7 @@ fn CallStaticIntMethodV<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> 
     }
 
     let method = method.unwrap();
-    let mut va_list = VaList::new(emulator, args);
+    let mut va_list = VaList::from_jni_style(emulator, name, 3, RegisterARM64::X3);
 
     let result = dalvik!(emulator).jni.as_mut().expect("JNI not register")
         .call_method_v(dalvik!(emulator), MethodAcc::STATIC | MethodAcc::INT, &class, method, None, &mut va_list);
@@ -978,7 +1043,7 @@ fn CallStaticVoidMethodV<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) ->
     }
 
     let method = method.unwrap();
-    let mut va_list = VaList::new(emulator, args);
+    let mut va_list = VaList::from_jni_style(emulator, name, 3, RegisterARM64::X3);
 
     dalvik!(emulator).jni.as_mut().expect("JNI not register")
         .call_method_v(dalvik!(emulator), MethodAcc::STATIC | MethodAcc::VOID, &class, method, None, &mut va_list);
@@ -1060,7 +1125,7 @@ fn GetStaticFieldID<T: Clone>(name: &str, emulator: &AndroidEmulator<T>) -> SvcC
         if option_env!("PRINT_JNI_CALLS").unwrap_or("") == "1" {
             debug!("{} {}(env = 0x{:x}, class = 0x{:x}, name = {}, signature = {}) => NoSuchFieldError", Color::Yellow.paint("JNI:"), Color::Blue.paint("GetStaticFieldID"), env!(emulator), clz_id, field_name, signature);
         }
-        dvm.throw(dvm.resolve_class("java/lang/NoSuchFieldError").unwrap().1.new_simple_instance(dalvik!(emulator)))
+        dvm.throw_class("java/lang/NoSuchFieldError")
     }
 
     RET(JNI_NULL)
@@ -1820,9 +1885,9 @@ pub fn initialize_env<T: Clone>(svc_memory: &mut SvcMemory<T>) -> u64 {
     let _get_superclass = svc_memory.register_svc(SimpleArm64Svc::new("_GetSuperclass", NoImplementedHandler));
     let _is_assignable_from = svc_memory.register_svc(SimpleArm64Svc::new("_IsAssignableFrom", NoImplementedHandler));
     let _to_reflected_field = svc_memory.register_svc(SimpleArm64Svc::new("_ToReflectedField", NoImplementedHandler));
-    let _throw = svc_memory.register_svc(SimpleArm64Svc::new("_Throw", NoImplementedHandler));
+    let _throw = svc_memory.register_svc(SimpleArm64Svc::new("_Throw", Throw));
     let _throw_new = svc_memory.register_svc(SimpleArm64Svc::new("_ThrowNew", NoImplementedHandler));
-    let _exception_occurred = svc_memory.register_svc(SimpleArm64Svc::new("_ExceptionOccurred", NoImplementedHandler));
+    let _exception_occurred = svc_memory.register_svc(SimpleArm64Svc::new("_ExceptionOccurred", ExceptionOccurred));
     let _exception_describe = svc_memory.register_svc(SimpleArm64Svc::new("_ExceptionDescribe", NoImplementedHandler));
     let _exception_clear = svc_memory.register_svc(SimpleArm64Svc::new("_ExceptionClear", ExceptionClear));
     let _fatal_error = svc_memory.register_svc(SimpleArm64Svc::new("_FatalError", NoImplementedHandler));
@@ -1831,46 +1896,46 @@ pub fn initialize_env<T: Clone>(svc_memory: &mut SvcMemory<T>) -> u64 {
     let _new_global_ref = svc_memory.register_svc(SimpleArm64Svc::new("_NewGlobalRef", NewGlobalRef));
     let _delete_global_ref = svc_memory.register_svc(SimpleArm64Svc::new("_DeleteGlobalRef", DeleteGlobalRef));
     let _delete_local_ref = svc_memory.register_svc(SimpleArm64Svc::new("_DeleteLocalRef", DeleteLocalRef));
-    let _is_same_object = svc_memory.register_svc(SimpleArm64Svc::new("_IsSameObject", NoImplementedHandler));
-    let _new_local_ref = svc_memory.register_svc(SimpleArm64Svc::new("_NewLocalRef", NoImplementedHandler));
+    let _is_same_object = svc_memory.register_svc(SimpleArm64Svc::new("_IsSameObject", IsSameObject));
+    let _new_local_ref = svc_memory.register_svc(SimpleArm64Svc::new("_NewLocalRef", NewLocalRef));
     let _ensure_local_capacity = svc_memory.register_svc(SimpleArm64Svc::new("_EnsureLocalCapacity", NoImplementedHandler));
-    let _alloc_object = svc_memory.register_svc(SimpleArm64Svc::new("_AllocObject", NoImplementedHandler));
-    let _new_object = svc_memory.register_svc(SimpleArm64Svc::new("_NewObject", NoImplementedHandler));
+    let _alloc_object = svc_memory.register_svc(SimpleArm64Svc::new("_AllocObject", AllocObject));
+    let _new_object = svc_memory.register_svc(SimpleArm64Svc::new("_NewObject", NewObjectV));
     let _new_object_v = svc_memory.register_svc(SimpleArm64Svc::new("_NewObjectV", NewObjectV));
-    let _new_object_a = svc_memory.register_svc(SimpleArm64Svc::new("_NewObjectA", NoImplementedHandler));
+    let _new_object_a = svc_memory.register_svc(SimpleArm64Svc::new("_NewObjectA", NewObjectV));
     let _get_object_class = svc_memory.register_svc(SimpleArm64Svc::new("_GetObjectClass", GetObjectClass));
     let _is_instance_of = svc_memory.register_svc(SimpleArm64Svc::new("_IsInstanceOf", NoImplementedHandler));
     let _get_method_id = svc_memory.register_svc(SimpleArm64Svc::new("_GetMethodID", GetMethodID));
-    let _call_object_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallObjectMethod", NoImplementedHandler));
+    let _call_object_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallObjectMethod", CallObjectMethodV));
     let _call_object_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallObjectMethodV", CallObjectMethodV));
-    let _call_object_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallObjectMethodA", NoImplementedHandler));
-    let _call_boolean_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallBooleanMethod", NoImplementedHandler));
+    let _call_object_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallObjectMethodA", CallObjectMethodV));
+    let _call_boolean_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallBooleanMethod", CallBooleanMethodV));
     let _call_boolean_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallBooleanMethodV", CallBooleanMethodV));
-    let _call_boolean_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallBooleanMethodA", NoImplementedHandler));
-    let _call_byte_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallByteMethod", NoImplementedHandler));
-    let _call_byte_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallByteMethodV", NoImplementedHandler));
-    let _call_byte_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallByteMethodA", NoImplementedHandler));
-    let _call_char_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallCharMethod", NoImplementedHandler));
-    let _call_char_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallCharMethodV", NoImplementedHandler));
-    let _call_char_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallCharMethodA", NoImplementedHandler));
-    let _call_short_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallShortMethod", NoImplementedHandler));
-    let _call_short_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallShortMethodV", NoImplementedHandler));
-    let _call_short_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallShortMethodA", NoImplementedHandler));
-    let _call_int_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallIntMethod", NoImplementedHandler));
+    let _call_boolean_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallBooleanMethodA", CallBooleanMethodV));
+    let _call_byte_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallByteMethod", SoftJniZero));
+    let _call_byte_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallByteMethodV", SoftJniZero));
+    let _call_byte_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallByteMethodA", SoftJniZero));
+    let _call_char_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallCharMethod", SoftJniZero));
+    let _call_char_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallCharMethodV", SoftJniZero));
+    let _call_char_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallCharMethodA", SoftJniZero));
+    let _call_short_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallShortMethod", SoftJniZero));
+    let _call_short_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallShortMethodV", SoftJniZero));
+    let _call_short_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallShortMethodA", SoftJniZero));
+    let _call_int_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallIntMethod", CallIntMethodV));
     let _call_int_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallIntMethodV", CallIntMethodV));
-    let _call_int_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallIntMethodA", NoImplementedHandler));
-    let _call_long_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallLongMethod", NoImplementedHandler));
-    let _call_long_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallLongMethodV", NoImplementedHandler));
-    let _call_long_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallLongMethodA", NoImplementedHandler));
-    let _call_float_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallFloatMethod", NoImplementedHandler));
-    let _call_float_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallFloatMethodV", NoImplementedHandler));
-    let _call_float_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallFloatMethodA", NoImplementedHandler));
-    let _call_double_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallDoubleMethod", NoImplementedHandler));
-    let _call_double_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallDoubleMethodV", NoImplementedHandler));
-    let _call_double_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallDoubleMethodA", NoImplementedHandler));
-    let _call_void_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallVoidMethod", NoImplementedHandler));
+    let _call_int_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallIntMethodA", CallIntMethodV));
+    let _call_long_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallLongMethod", SoftJniZero));
+    let _call_long_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallLongMethodV", SoftJniZero));
+    let _call_long_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallLongMethodA", SoftJniZero));
+    let _call_float_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallFloatMethod", SoftJniZero));
+    let _call_float_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallFloatMethodV", SoftJniZero));
+    let _call_float_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallFloatMethodA", SoftJniZero));
+    let _call_double_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallDoubleMethod", SoftJniZero));
+    let _call_double_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallDoubleMethodV", SoftJniZero));
+    let _call_double_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallDoubleMethodA", SoftJniZero));
+    let _call_void_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallVoidMethod", CallVoidMethodV));
     let _call_void_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallVoidMethodV", CallVoidMethodV));
-    let _call_void_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallVoidMethodA", NoImplementedHandler));
+    let _call_void_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallVoidMethodA", CallVoidMethodV));
     let _call_nonvirtual_object_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallNonvirtualObjectMethod", NoImplementedHandler));
     let _call_nonvirtual_object_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallNonvirtualObjectMethodV", NoImplementedHandler));
     let _call_nonvirtual_object_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallNonvirtualObjectMethodA", NoImplementedHandler));
@@ -1903,73 +1968,73 @@ pub fn initialize_env<T: Clone>(svc_memory: &mut SvcMemory<T>) -> u64 {
     let _call_nonvirtual_void_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallNonvirtualVoidMethodA", NoImplementedHandler));
     let _get_field_id = svc_memory.register_svc(SimpleArm64Svc::new("_GetFieldID", GetFieldID));
     let _get_object_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetObjectField", GetObjectField));
-    let _get_boolean_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetBooleanField", NoImplementedHandler));
-    let _get_byte_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetByteField", NoImplementedHandler));
-    let _get_char_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetCharField", NoImplementedHandler));
-    let _get_short_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetShortField", NoImplementedHandler));
+    let _get_boolean_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetBooleanField", SoftJniZero));
+    let _get_byte_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetByteField", SoftJniZero));
+    let _get_char_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetCharField", SoftJniZero));
+    let _get_short_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetShortField", SoftJniZero));
     let _get_int_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetIntField", GetIntField));
-    let _get_long_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetLongField", NoImplementedHandler));
-    let _get_float_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetFloatField", NoImplementedHandler));
-    let _get_double_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetDoubleField", NoImplementedHandler));
+    let _get_long_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetLongField", SoftJniZero));
+    let _get_float_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetFloatField", SoftJniZero));
+    let _get_double_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetDoubleField", SoftJniZero));
     let _set_object_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetObjectField", SetObjectField));
-    let _set_boolean_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetBooleanField", NoImplementedHandler));
-    let _set_byte_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetByteField", NoImplementedHandler));
-    let _set_char_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetCharField", NoImplementedHandler));
-    let _set_short_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetShortField", NoImplementedHandler));
-    let _set_int_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetIntField", NoImplementedHandler));
-    let _set_long_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetLongField", NoImplementedHandler));
-    let _set_float_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetFloatField", NoImplementedHandler));
-    let _set_double_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetDoubleField", NoImplementedHandler));
+    let _set_boolean_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetBooleanField", SoftJniZero));
+    let _set_byte_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetByteField", SoftJniZero));
+    let _set_char_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetCharField", SoftJniZero));
+    let _set_short_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetShortField", SoftJniZero));
+    let _set_int_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetIntField", SoftJniZero));
+    let _set_long_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetLongField", SoftJniZero));
+    let _set_float_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetFloatField", SoftJniZero));
+    let _set_double_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetDoubleField", SoftJniZero));
     let _get_static_method_id = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticMethodID", GetStaticMethodID));
-    let _call_static_object_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticObjectMethod", NoImplementedHandler));
+    let _call_static_object_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticObjectMethod", CallStaticObjectMethodV));
     let _call_static_object_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticObjectMethodV", CallStaticObjectMethodV));
-    let _call_static_object_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticObjectMethodA", NoImplementedHandler));
-    let _call_static_boolean_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticBooleanMethod", NoImplementedHandler));
-    let _call_static_boolean_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticBooleanMethodV", NoImplementedHandler));
-    let _call_static_boolean_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticBooleanMethodA", NoImplementedHandler));
-    let _call_static_byte_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticByteMethod", NoImplementedHandler));
-    let _call_static_byte_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticByteMethodV", NoImplementedHandler));
-    let _call_static_byte_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticByteMethodA", NoImplementedHandler));
-    let _call_static_char_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticCharMethod", NoImplementedHandler));
-    let _call_static_char_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticCharMethodV", NoImplementedHandler));
-    let _call_static_char_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticCharMethodA", NoImplementedHandler));
-    let _call_static_short_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticShortMethod", NoImplementedHandler));
-    let _call_static_short_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticShortMethodV", NoImplementedHandler));
-    let _call_static_short_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticShortMethodA", NoImplementedHandler));
-    let _call_static_int_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticIntMethod", NoImplementedHandler));
+    let _call_static_object_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticObjectMethodA", CallStaticObjectMethodV));
+    let _call_static_boolean_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticBooleanMethod", SoftJniZero));
+    let _call_static_boolean_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticBooleanMethodV", SoftJniZero));
+    let _call_static_boolean_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticBooleanMethodA", SoftJniZero));
+    let _call_static_byte_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticByteMethod", SoftJniZero));
+    let _call_static_byte_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticByteMethodV", SoftJniZero));
+    let _call_static_byte_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticByteMethodA", SoftJniZero));
+    let _call_static_char_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticCharMethod", SoftJniZero));
+    let _call_static_char_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticCharMethodV", SoftJniZero));
+    let _call_static_char_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticCharMethodA", SoftJniZero));
+    let _call_static_short_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticShortMethod", SoftJniZero));
+    let _call_static_short_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticShortMethodV", SoftJniZero));
+    let _call_static_short_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticShortMethodA", SoftJniZero));
+    let _call_static_int_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticIntMethod", CallStaticIntMethodV));
     let _call_static_int_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticIntMethodV", CallStaticIntMethodV));
-    let _call_static_int_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticIntMethodA", NoImplementedHandler));
-    let _call_static_long_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticLongMethod", NoImplementedHandler));
-    let _call_static_long_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticLongMethodV", NoImplementedHandler));
-    let _call_static_long_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticLongMethodA", NoImplementedHandler));
-    let _call_static_float_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticFloatMethod", NoImplementedHandler));
-    let _call_static_float_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticFloatMethodV", NoImplementedHandler));
-    let _call_static_float_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticFloatMethodA", NoImplementedHandler));
-    let _call_static_double_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticDoubleMethod", NoImplementedHandler));
-    let _call_static_double_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticDoubleMethodV", NoImplementedHandler));
-    let _call_static_double_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticDoubleMethodA", NoImplementedHandler));
-    let _call_static_void_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticVoidMethod", NoImplementedHandler));
+    let _call_static_int_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticIntMethodA", CallStaticIntMethodV));
+    let _call_static_long_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticLongMethod", SoftJniZero));
+    let _call_static_long_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticLongMethodV", SoftJniZero));
+    let _call_static_long_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticLongMethodA", SoftJniZero));
+    let _call_static_float_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticFloatMethod", SoftJniZero));
+    let _call_static_float_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticFloatMethodV", SoftJniZero));
+    let _call_static_float_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticFloatMethodA", SoftJniZero));
+    let _call_static_double_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticDoubleMethod", SoftJniZero));
+    let _call_static_double_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticDoubleMethodV", SoftJniZero));
+    let _call_static_double_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticDoubleMethodA", SoftJniZero));
+    let _call_static_void_method = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticVoidMethod", CallStaticVoidMethodV));
     let _call_static_void_method_v = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticVoidMethodV", CallStaticVoidMethodV));
-    let _call_static_void_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticVoidMethodA", NoImplementedHandler));
+    let _call_static_void_method_a = svc_memory.register_svc(SimpleArm64Svc::new("_CallStaticVoidMethodA", CallStaticVoidMethodV));
     let _get_static_field_id = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticFieldID", GetStaticFieldID));
     let _get_static_object_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticObjectField", GetStaticObjectField));
-    let _get_static_boolean_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticBooleanField", NoImplementedHandler));
-    let _get_static_byte_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticByteField", NoImplementedHandler));
-    let _get_static_char_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticCharField", NoImplementedHandler));
-    let _get_static_short_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticShortField", NoImplementedHandler));
+    let _get_static_boolean_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticBooleanField", SoftJniZero));
+    let _get_static_byte_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticByteField", SoftJniZero));
+    let _get_static_char_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticCharField", SoftJniZero));
+    let _get_static_short_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticShortField", SoftJniZero));
     let _get_static_int_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticIntField", GetStaticIntField));
-    let _get_static_long_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticLongField", NoImplementedHandler));
-    let _get_static_float_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticFloatField", NoImplementedHandler));
-    let _get_static_double_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticDoubleField", NoImplementedHandler));
-    let _set_static_object_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticObjectField", NoImplementedHandler));
-    let _set_static_boolean_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticBooleanField", NoImplementedHandler));
-    let _set_static_byte_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticByteField", NoImplementedHandler));
-    let _set_static_char_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticCharField", NoImplementedHandler));
-    let _set_static_short_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticShortField", NoImplementedHandler));
-    let _set_static_int_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticIntField", NoImplementedHandler));
-    let _set_static_long_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticLongField", NoImplementedHandler));
-    let _set_static_float_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticFloatField", NoImplementedHandler));
-    let _set_static_double_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticDoubleField", NoImplementedHandler));
+    let _get_static_long_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticLongField", SoftJniZero));
+    let _get_static_float_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticFloatField", SoftJniZero));
+    let _get_static_double_field = svc_memory.register_svc(SimpleArm64Svc::new("_GetStaticDoubleField", SoftJniZero));
+    let _set_static_object_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticObjectField", SoftJniZero));
+    let _set_static_boolean_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticBooleanField", SoftJniZero));
+    let _set_static_byte_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticByteField", SoftJniZero));
+    let _set_static_char_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticCharField", SoftJniZero));
+    let _set_static_short_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticShortField", SoftJniZero));
+    let _set_static_int_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticIntField", SoftJniZero));
+    let _set_static_long_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticLongField", SoftJniZero));
+    let _set_static_float_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticFloatField", SoftJniZero));
+    let _set_static_double_field = svc_memory.register_svc(SimpleArm64Svc::new("_SetStaticDoubleField", SoftJniZero));
     let _new_string = svc_memory.register_svc(SimpleArm64Svc::new("_NewString", NoImplementedHandler));
     let _get_string_length = svc_memory.register_svc(SimpleArm64Svc::new("_GetStringLength", GetStringLength));
     let _get_string_chars = svc_memory.register_svc(SimpleArm64Svc::new("_GetStringChars", NoImplementedHandler));

@@ -1,5 +1,5 @@
 
-    C++用x86(IA-32), x64(AMD64, x86-64) JITアセンブラ Xbyak 7.07
+    C++用x86(IA-32), x64(AMD64, x86-64) JITアセンブラ Xbyak 7.33.2
 
 -----------------------------------------------------------------------------
 ◎概要
@@ -14,7 +14,7 @@
     xbyak.hをインクルードするだけですぐ利用することができます。
     C++の枠組み内で閉じているため、外部アセンブラは不要です。
     32bit/64bit両対応です。
-    対応ニーモニック:特権命令除くx86, MMX/MMX2/SSE/SSE2/SSE3/SSSE3/SSE4/FPU(一部)/AVX/AVX2/FMA/VEX-encoded GPR
+    対応ニーモニック:特権命令除くx86, MMX/MMX2/SSE/SSE2/SSE3/SSSE3/SSE4/FPU(一部)/AVX/AVX2/FMA/AVX-512/APX/AVX10.2
 
 ・Windows Xp(32bit, 64bit), Windows 7/Linux(32bit, 64bit)/Intel Mac対応
     Windows Xp, Windows 7上ではVC2008, VC2010, VC2012
@@ -46,7 +46,7 @@ Linuxではmake installで/usr/local/include/xbyakにコピーされます。
 -----------------------------------------------------------------------------
 ◎新機能
 
-APX/AVX10対応
+APX/AVX10.2対応
 
 例外なしモード追加
 XBYAK_NO_EXCEPTIONを定義してコンパイルするとgcc/clangで-fno-exceptionsオプションでコンパイルできます。
@@ -404,6 +404,33 @@ sample/{echo,hello}.bfは http://www.kmonos.net/alang/etc/brainfuck.php から
 -----------------------------------------------------------------------------
 ◎履歴
 
+2026/02/10 ver 7.33.2 cmpxchg16bでxwordを使えるようにする
+2026/02/10 ver 7.33 CpuMaskの文字列フォーマットの変更
+2026/02/09 ver 7.32 Intel 319433-059で参照されたいくつかの命令を削除
+2026/02/06 ver 7.31 ヘテロジニアスな環境のキャッシュ情報を扱うutil::CpuTopology追加
+2025/09/02 ver 7.30 tcvtrowd2ps追加
+2025/08/22 ver 7.29.2 override属性追加
+2025/08/16 ver 7.29.1 ptr[整数] 形式のサポート
+2025/08/15 ver 7.29 アドレッシングでラベルサポート
+2025/07/19 ver 7.28 movrs, vmovrs{b,w,d,q}をサポート
+2025/07/02 ver 7.27 新しいAVX10.2仕様書にしたがってYMMレジスタの埋め込み丸めとsaeの削除
+2025/06/10 ver 7.26 Diamond Rapids用AMX対応
+2025/06/02 ver 7.25 新しいAVX10.2仕様書にしたがってBF16命令をリネーム
+2025/03/12 ver 7.24.2 vcvtneps2bf16はAVX-NE-CONVERTをサポートすべき(revert 749aa31)
+2025/02/26 ver 7.24.1 NDD形式の3-opシフト命令のバグ修正
+2025/02/17 ver 7.24 ahなどとREXプレフィクスの共用やadd eax, byte[rax]のようなサイズ不整合をエラーとする
+2025/02/07 ver 7.23.1 StackFrame::close()の挙動を元に戻す
+2025/02/07 ver 7.23 レジスタサイズのチェック厳密化・16ビット側値の範囲改善・StackFrame::close()の仕様変更。push/pop with APX修正。
+2024/11/11 ver 7.22 Reg::cvt{128,256,512}(). xed 2024.11.04でテスト
+2024/10/31 ver 7.21 SSE命令のXMMレジスタのチェックを厳密化
+2024/10/17 ver 7.20.1 AVX10.2 rev 2.0仕様書の変更に追従
+2024/10/15 ver 7.20 setDefaultEncoding/setDefaultEncodingAVX10の仕様確定
+2024/10/15 ver 7.11 AVX10.2完全サポート
+2024/10/13 ver 7.10 AVX10 integer and fp16 vnni, mediaの新命令対応. setDefaultEncodingの拡張.
+2024/10/10 ver 7.09.1 vpcompressbとvpcompresswの名前修正
+2024/10/08 ver 7.09 AVX10.2のYMMレジスタの埋め込み丸め対応
+2024/10/07 ver 7.08 rdfabaseなどサポート
+2024/08/29 ver 7.07.1 xchgの仕様をnasm 2.16.03の挙動に合わせる。
 2024/06/11 ver 7.07 xresldtrk/xsusldtrkサポート
 2024/03/07 ver 7.06 util::Cpuのキャッシュ判定周りがAMD CPU対応
 2024/02/11 ver 7.05.1 util::CpuのextractBit()とautoGrowモードでのalign()の修正

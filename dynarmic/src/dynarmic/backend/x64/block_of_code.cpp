@@ -219,7 +219,7 @@ bool IsUnderRosetta() {
 
 }  // anonymous namespace
 
-BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_code_size, const std::function<void(BlockOfCode&)>& rcp)
+BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_code_size, std::function<void(BlockOfCode&)> rcp)
         : Xbyak::CodeGenerator(total_code_size, nullptr, &s_allocator)
         , cb(std::move(cb))
         , jsi(jsi)
@@ -305,7 +305,7 @@ void BlockOfCode::ForceReturnFromRunCode(bool mxcsr_already_exited) {
     jmp(return_from_run_code[index]);
 }
 
-void BlockOfCode::GenRunCode(const std::function<void(BlockOfCode&)>& rcp) {
+void BlockOfCode::GenRunCode(std::function<void(BlockOfCode&)> rcp) {
     Xbyak::Label return_to_caller, return_to_caller_mxcsr_already_exited;
 
     align();

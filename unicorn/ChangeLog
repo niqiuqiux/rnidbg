@@ -1,6 +1,228 @@
 This file details the changelog of Unicorn Engine.
 
 -------------------------------
+[Version 2.1.4]: September 9th, 2025
+
+Hello everyone. It has been a while since last release and we are releasing Unicorn 2.1.4. Though it is a patch release, there are some highlights worth mentioning.
+
+The very first thing is that, Unicorn (finally!) offers consistent PC guarantee in all cases. Well, it might sound weird that why it was not. Generally QEMU is not designed to keep PC synced in all cases for performance and Unicorn once put necessary hacks but those hacks were too hard to maintain. Now we have architecture agnostic mechanism to offer the PC guarantee.
+
+In addition, we offer a standalone unicorn Rust crate `unicorn-engine-sys` to allows users to build their own bindings since v2.1.4. There are also lots of bindings improvements contained in this release.
+
+We also fix the building and distribution issues for macos ARM and distribute wheels again. Our friend @patryk4815 from pwndbg helps sort this out. Kudos to him!
+
+For 2.2.0, personally I wish I could work it out before the end of this year, by merging lots of pending big PRs but my time budget is relatively limited recently. Please aware that 2.2.0 would probably bump QEMU version to 5.1.0 or even higher so semantics could be changed. Any help is highly welcome and please contact @wtdcode if you are keen.
+
+Lastly, I would like to express my deep gratitude to all contributors that help make this release happen, specifically @Evian-Zhang for Rust improvements and unicornafl integration, @Antelox for consistent contributions on our workflows, @amaanq for various huge work, reviews and Rust bindings split, @PhilippTakacs for PR reviews and fix. Again, thanks for every contributor!
+
+Below goes the auto generated release notes. Starting from this tag, the release note will switch to a short passage plus Github generated contents because this makes it easier to follow big changes.
+
+## What's Changed
+* bindings/zig: Fix sample_riscv_zig partial writes and logging by @fervagar in https://github.com/unicorn-engine/unicorn/pull/2133
+* Fix physical address truncation on 32-bit systems with addressing extensions by @ExhoAR22 in https://github.com/unicorn-engine/unicorn/pull/2139
+* refactor(lib): mark pointers as const where possible by @amaanq in https://github.com/unicorn-engine/unicorn/pull/2140
+* bindings: ruby: fix unexpected uc_query result pointer type by @anthraxx in https://github.com/unicorn-engine/unicorn/pull/1962
+* bindings: ruby: fix version identifier to 2.1.3 by @anthraxx in https://github.com/unicorn-engine/unicorn/pull/2142
+* feat(arm): add an `ESR` register by @amaanq in https://github.com/unicorn-engine/unicorn/pull/2155
+* fix(rust): watch all source and header files by @amaanq in https://github.com/unicorn-engine/unicorn/pull/2159
+* feat(rust): improve ARM CP register ergonomics by @amaanq in https://github.com/unicorn-engine/unicorn/pull/2160
+* fix(m68k): correct SR register read by @amaanq in https://github.com/unicorn-engine/unicorn/pull/2161
+* fix(python): catch `BaseException` in wrappers instead of `Exception` by @amaanq in https://github.com/unicorn-engine/unicorn/pull/2163
+* Remove the size limit for memory read and write (revamped) by @rliebig in https://github.com/unicorn-engine/unicorn/pull/2144
+* Loongarch port by @wtdcode in https://github.com/unicorn-engine/unicorn/pull/2164
+* S390x registers by @wtdcode in https://github.com/unicorn-engine/unicorn/pull/2167
+* Add from_handle_with_data method by @Evian-Zhang in https://github.com/unicorn-engine/unicorn/pull/2169
+* Make Unicorn struct clone-able by @Evian-Zhang in https://github.com/unicorn-engine/unicorn/pull/2170
+* Add Display and Error impl for uc_error for Rust bindings by @Evian-Zhang in https://github.com/unicorn-engine/unicorn/pull/2171
+* Add edge generated callback by @Evian-Zhang in https://github.com/unicorn-engine/unicorn/pull/2176
+* Correctly restore skip_sync_pc_on_exit by @Evian-Zhang in https://github.com/unicorn-engine/unicorn/pull/2181
+* Added CFG check and standalone flag for .NET binding by @AdvDebug in https://github.com/unicorn-engine/unicorn/pull/2182
+* qemu/configure: make strings command can be redefined by ${STRINGS} by @clan in https://github.com/unicorn-engine/unicorn/pull/2186
+* fix x86 pc by @wtdcode in https://github.com/unicorn-engine/unicorn/pull/2187
+* Patch from Saferewrite by @wtdcode in https://github.com/unicorn-engine/unicorn/pull/2188
+* fix incorrect ret of trampoline `closure` in `alloc_code_gen_buffer` by @HyperSine in https://github.com/unicorn-engine/unicorn/pull/2197
+* reset invalid_error before ram_block_add by @PhilippTakacs in https://github.com/unicorn-engine/unicorn/pull/2189
+* add uc_mem_read_virtual by @PhilippTakacs in https://github.com/unicorn-engine/unicorn/pull/2121
+* Minor fixes for vmem apis by @wtdcode in https://github.com/unicorn-engine/unicorn/pull/2199
+* glib_compat/glib_compact: Clear the buffer in g_hash_table_resize by @MarsDoge in https://github.com/unicorn-engine/unicorn/pull/2219
+* Enable install for rust bindings by @wtdcode in https://github.com/unicorn-engine/unicorn/pull/2224
+* Remove ninja installation from macos runners by @scribam in https://github.com/unicorn-engine/unicorn/pull/2225
+* Fix `read_sprr_perm` for Apple real CPUs and GitHub Actions; enable Apple ARM64 wheel builds on PyPI. Fixes #2033. by @patryk4815 in https://github.com/unicorn-engine/unicorn/pull/2227
+* Bump cmake minimum required version to 3.10 by @scribam in https://github.com/unicorn-engine/unicorn/pull/2226
+* Add support for clangarm64 by @scribam in https://github.com/unicorn-engine/unicorn/pull/2228
+* Revert "glib_compat/glib_compact: Clear the buffer in g_hash_table_resize" by @wtdcode in https://github.com/unicorn-engine/unicorn/pull/2220
+* Python bindings: Use ABI3 wheels by @Antelox in https://github.com/unicorn-engine/unicorn/pull/2223
+* concurrent control by @wtdcode in https://github.com/unicorn-engine/unicorn/pull/2235
+
+## New Contributors
+* @fervagar made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2133
+* @ExhoAR22 made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2139
+* @anthraxx made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1962
+* @rliebig made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2144
+* @AdvDebug made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2182
+* @HyperSine made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2197
+* @MarsDoge made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2219
+* @patryk4815 made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2227
+
+**Full Changelog**: https://github.com/unicorn-engine/unicorn/compare/v2.1.3...v2.1.4
+
+-------------------------------
+[Version 2.1.3]: March 7th, 2025
+
+2.1.3 includes a few fixes for distribution and stability issues. We urge users to update their versions as previous version contains security vulnerabilities.
+
+Fix & Improvements
+
+- Several security issues fixes. @PhilippTakacs 
+- Add alpine workflow and fix several distribution issues. @Antelox 
+- Introduce importlib_resources for py3.8 (EOL already) @Arusekk @Antelox 
+- Mips64 improvemtns. @OBarronCS 
+- mips related fixes and implement a few registers.
+- x86 default cpu model is changed to `UC_CPU_X86_HASWELL` and remove a few quirks.
+- Fix CR4 implementation.
+- Fix python bindings break changes by adding back `ctl_tlb_mode`. @Antelox 
+
+New Contributors
+* @OBarronCS made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2111
+
+Full Changelog: https://github.com/unicorn-engine/unicorn/compare/2.1.2...2.1.3
+
+-------------------------------
+[Version 2.1.2]: Feb 13rd, 2025
+2.1.2 is a patch release to mainly resolve the stability issue of the 2.1.0 release series and fix a few distribution issues. All users of Unicorn are expected to upgrade. 
+
+Highlights
+
+- macOS arm64 no longer provides binary wheels due to a feature missing from Github Action runners.
+- py3.8 support is brought back, python2 wheels are built and test as well and we migrate to cibuildwheel! @Antelox 
+- Several polish to python bindings and implement new API. @elicn  @droe 
+- Revert previous break changes that return UC_ERR_ARG for non-existing registers. Now this prints a warning. We urge all users relying on this behavior to fix code as soon as possible.
+- Fix several segment faults, including a few long-standing random segfault issues.
+- Revive previous unicorn 1 test suite and related refactoring. @elicn @Antelox 
+- Optimize memory handling and notdirty writes for faster memory access and snapshots, especially useful for fuzzing. @PhilippTakacs 
+- RISC-V API updates. @apparentlymart 
+- fix UC_HOOK_MEM_READ on aarch64. @glennsec 
+- Support UC_TCG_OP_FLAG_CMP for ARM @dotCirill 
+- An alternative tag prefixed with "v" is added for golang compatibility.
+
+Fix & Improvements
+
+- Implement UC_ARM64_REG_WSP
+- Several fixes on arm64 macos @tbodt 
+- reg_read_batch and reg_write_batch @hsa1as 
+- Fix pc sync issue for SPARC, MIPS, x86. This also fixes PC sync issue within UC_HOOK_BLOCK hooks.
+- Allow cmake to install files on Windows and allow cmake not to generate Unicorn 1 style all-in-one objects archive 
+- Make i386 instructions RDTSC and RDTSCP hookable @t0rr3sp3dr0 
+- Allow Statically Linking in Go @t0rr3sp3dr0 
+- Rust bindings improvements @Sanae6 
+- Patch multiple UC_HOOK_MEM callbacks for unaligned access @Michael-c0de 
+- Fix UC_MEM_FETCH_PROT for data read
+- Remove more Unicorn 1 hacks to improve performance.
+- Docs & unit test updates. @saicao 
+- Allow uc_ctl_set_page_size() for arm64 @droe 
+- Musl builds @clan 
+- mips16 fix @ZakDanger 
+- Fix UC_HOOK_MEM on arm32 @xndcn 
+- Fix heap buffer overflow in op_cksm function @Shivam7-1 
+
+
+New Contributors
+* @droe made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2023
+* @Antelox made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2026
+* @tbodt made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2049
+* @hsa1as made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2060
+* @t0rr3sp3dr0 made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2066
+* @Sanae6 made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2069
+* @Michael-c0de made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2063
+* @Evian-Zhang made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2064
+* @glennsec made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2028
+* @clan made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2085
+* @xndcn made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2091
+* @Shivam7-1 made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2096
+* @amaanq made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2099
+
+Full Changelog: https://github.com/unicorn-engine/unicorn/compare/2.1.1...2.1.2
+
+As usual, thanks to all contributors and sorry if I missed your name here (please tell me @wtdcode !).
+
+Lastly and personally, I would like to express my big thanks to @Antelox @elicn and @PhilippTakacs for spending lots of time improving Unicorn Engine. Also, there are a few big pull requests adding new architectures (RH850, TCI,  LoongArch64, AVR) and I will actively push them to 2.2.0.
+
+-------------------------------
+[Version 2.1.1]: Sept 26th, 2024
+
+This is a small release to fix a few urgent issues.
+
+- Remove pkg_resources usage
+- Fix wheels distribution for x86_64 macos
+- Fix redundant wheel hacks
+- Support musllinux distribution
+
+-------------------------------
+[Version 2.1.0]: Sept 22nd, 2024
+
+It has been a while since the last release, and 2.1.0 brings several exciting features. Below is the changelog from the latest to the oldest (though not strictly).
+
+Highlights
+
+- Revive QEMU logs, now we have `-DUNICORN_LOGGING=yes` to enable all qemu logs. @BitMaskMixer 
+- Faster (up to 40x) write performance by not always doing `store_helper` and cleaning page locks. @tunz @boborjan2
+- Brand new python bindings, with strongly typed and many improvements. @elicn 
+- Fix to a long-standing MinGW random segfault bug.
+- We bring python2 compatibility back.
+- We now fully support M1, both building and a pre-built wheel.
+- We support snapshot memory now, with a very low overhead copy-on-write fashion. @PhilippTakacs 
+- An option to bypass MMU is also added, check our FAQ. @PhilippTakacs 
+- A brand new (and modern) java bindings. We are also working to publish it to maven. @nneonneo
+- We have zig integrated. @kassane @atipls 
+- Now Unicorn no longer allocates 2GB memory for every instance. The memory will be only committed once used and the upper limit can be adjusted with `uc_ctl`.
+- New DotNet binding, with published to both Github and Nuget. @TSRBerry 
+- The release will attach all binaries, thanks to @marameref 
+
+Fixes & Improvements
+
+- RISCV improvements, but we still have a long way to go. @apparentlymart @ks0777 
+- cmake improvements @scribam @es3n1n 
+- Various python bindings fix and improvements @bet4it @rhelmot 
+- Docs. @gerph @BitMaskMixer 
+- Rust bindings. @lockbox @mlgiraud @deadash
+- TCG backend fixes. @redoste @StalkR @dglynos 
+- PPC32 fixes. @dotCirill 
+- Haiku fixes. @kallisti5 
+- Improvements to avoid simulator detection. @mrexodia 
+
+New Contributors
+
+* @ks0777 made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1736
+* @LG3696 made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1764
+* @PhilippTakacs made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1765
+* @edsky made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1754
+* @tunz made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1790
+* @kassane made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1809
+* @Xeonacid made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1807
+* @nneonneo made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1830
+* @lockbox made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1847
+* @mlgiraud made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1849
+* @basavesh made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1861
+* @hamarituc made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1886
+* @StalkR made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1907
+* @dotCirill made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1910
+* @marameref made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1897
+* @redoste made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1922
+* @xclusivor made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1929
+* @elicn made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1629
+* @nganhkhoa made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1942
+* @es3n1n made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1960
+* @BitMaskMixer made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1977
+* @apparentlymart made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1995
+* @atipls made their first contribution in https://github.com/unicorn-engine/unicorn/pull/1985
+* @omer54463 made their first contribution in https://github.com/unicorn-engine/unicorn/pull/2005
+
+Full Changelog: https://github.com/unicorn-engine/unicorn/compare/2.0.1...2.1.0
+
+
+Again, thanks for all contributors and sorry if I missed your name here (please tell me @wtdcode !). 2.1.1 is also coming because we expect some minor break changes to fix.
+
+-------------------------------
 [Version 2.0.1.post1]: Nov 22nd, 2022
 
 This is a small release to complement the previous 2.0.1 release.

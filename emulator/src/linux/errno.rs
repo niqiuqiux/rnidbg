@@ -7,6 +7,7 @@ pub enum Errno {
     ENOENT = 2,
     ENXIO = 6,
     EBADF = 9,
+    ECHILD = 10,
     EAGAIN = 11,
     ENOMEM = 12,
     EACCES = 13,
@@ -15,9 +16,13 @@ pub enum Errno {
     ENODEV = 19,
     EINVAL = 22,
     ENFILE = 23,
+    ENOTTY = 25,
     ESPIPE = 29,
     EROFS = 30,
+    ERANGE = 34,
+    ENOSYS = 38,
     ENOTSOCK = 88,
+    EAFNOSUPPORT = 97,
     ETIMEDOUT = 110,
 }
 

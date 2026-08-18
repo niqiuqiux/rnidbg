@@ -51,14 +51,14 @@ fn arm64_syscall_handler_unicorn<T: Clone>(unicorn: &unicorn_engine::Unicorn<T>,
         let svc = svc_memory.get_svc(swi as u32);
         if let Some(svc) = svc {
             match svc.handle(&emulator) {
-                Ok(Some(ret)) => {
-                    unicorn.reg_write_i64(unicorn_engine::RegisterARM64::X0, ret).unwrap();
-                }
-                Ok(None) => {}
-                Err(e) => {
+                SvcCallResult::VOID => {}
+                SvcCallResult::FUCK(e) => {
                     error!("svc handle failed: {:?}", e);
                     unicorn.emu_stop()
                         .expect("failed to stop emulator");
+                }
+                SvcCallResult::RET(ret) => {
+                    unicorn.reg_write_i64(unicorn_engine::RegisterARM64::X0, ret).unwrap();
                 }
             }
             return;
@@ -167,8 +167,20 @@ fn arm64_syscall_handler_dynarmic<T: Clone>(swi: i32, emulator: &AndroidEmulator
 
 #[inline]
 fn syscall<'a, T: Clone>(nr: Syscalls, backend: &Backend<'a, T>, emulator: &AndroidEmulator<'a, T>)  {
-    if option_env!("EMU_LOG") == Some("1") {
+    if option_env!("EMU_LOG") == Some("1")
+        || std::env::var("PRINT_SYSCALL_LOG").ok().as_deref() == Some("1")
+    {
         info!("syscall: {:?}", nr);
+    }
+    // Re-arm the stack canary in TLS slot 5. Some libc paths clobber it.
+    // Skip after pthread_exit unmaps the TCB.
+    if let Ok(tls) = backend.reg_read(RegisterARM64::TPIDR_EL0) {
+        if tls != 0 {
+            let mut probe = [0u8; 8];
+            if backend.mem_read(tls + 8 * 5, &mut probe).is_ok() {
+                let _ = backend.mem_write(tls + 8 * 5, &0xa5a5_a5a5_a5a5_a5a5u64.to_le_bytes());
+            }
+        }
     }
     let _ = match nr {
         Syscalls::__NR_openat => {
@@ -267,11 +279,98 @@ fn syscall<'a, T: Clone>(nr: Syscalls, backend: &Backend<'a, T>, emulator: &Andr
         Syscalls::__NR_pipe2 => {
             syscalls::syscall_pipe2(backend, emulator);
         }
+        Syscalls::__NR_exit_group => {
+            syscalls::syscall_exit_group(backend, emulator);
+        }
+        Syscalls::__NR3264_fcntl => {
+            syscalls::syscall_nr3264_fcntl(backend, emulator);
+        }
+        Syscalls::__NR_writev => {
+            syscalls::syscall_writev(backend, emulator);
+        }
+        Syscalls::__NR_uname => {
+            syscalls::syscall_uname(backend, emulator);
+        }
+        Syscalls::__NR_gettid => {
+            syscalls::syscall_gettid(backend, emulator);
+        }
+        Syscalls::__NR_getcwd => {
+            syscalls::syscall_getcwd(backend, emulator);
+        }
+        Syscalls::__NR_readlinkat => {
+            syscalls::syscall_readlinkat(backend, emulator);
+        }
+        Syscalls::__NR_dup3 => {
+            syscalls::syscall_dup3(backend, emulator);
+        }
+        Syscalls::__NR_getrandom => {
+            syscalls::syscall_getrandom(backend, emulator);
+        }
+        Syscalls::__NR_ioctl => {
+            syscalls::syscall_ioctl(backend, emulator);
+        }
+        Syscalls::__NR_set_robust_list => {
+            syscalls::syscall_set_robust_list(backend, emulator);
+        }
+        Syscalls::__NR_rseq => {
+            syscalls::syscall_rseq(backend, emulator);
+        }
+        Syscalls::__NR_membarrier => {
+            syscalls::syscall_membarrier(backend, emulator);
+        }
+        Syscalls::__NR_faccessat2 => {
+            syscalls::syscall_faccessat(backend, emulator);
+        }
+        Syscalls::__NR_statx => {
+            syscalls::syscall_statx(backend, emulator);
+        }
+        Syscalls::__NR3264_statfs | Syscalls::__NR_statfs => {
+            syscalls::syscall_statfs(backend, emulator);
+        }
+        Syscalls::__NR_nanosleep | Syscalls::__NR_clock_nanosleep => {
+            syscalls::syscall_nanosleep(backend, emulator);
+        }
+        Syscalls::__NR_sched_yield => {
+            syscalls::syscall_sched_yield(backend, emulator);
+        }
+        Syscalls::__NR_sched_getaffinity => {
+            syscalls::syscall_sched_getaffinity(backend, emulator);
+        }
+        Syscalls::__NR_sched_setaffinity => {
+            syscalls::syscall_sched_setaffinity(backend, emulator);
+        }
+        Syscalls::__NR_ppoll => {
+            let _ = backend.reg_write(RegisterARM64::X0, 0);
+        }
+        Syscalls::__NR_clone3 => {
+            syscalls::syscall_enosys(backend, emulator, nr);
+        }
+        Syscalls::__NR_rt_sigaction => {
+            syscalls::syscall_rt_sigaction(backend, emulator);
+        }
+        Syscalls::__NR_rt_tgsigqueueinfo => {
+            syscalls::syscall_rt_tgsigqueueinfo(backend, emulator);
+        }
+        Syscalls::__NR_rt_sigtimedwait => {
+            syscalls::syscall_rt_sigtimedwait(backend, emulator);
+        }
+        Syscalls::__NR_kill => {
+            syscalls::syscall_kill(backend, emulator);
+        }
+        Syscalls::__NR_tkill => {
+            syscalls::syscall_kill(backend, emulator);
+        }
+        Syscalls::__NR_tgkill => {
+            syscalls::syscall_kill(backend, emulator);
+        }
+        Syscalls::__NR_wait4 => {
+            syscalls::syscall_wait4(backend, emulator);
+        }
+        Syscalls::__NR_waitid => {
+            syscalls::syscall_wait4(backend, emulator);
+        }
         _ => {
-            info!("Unsupported syscall: {:?}", nr);
-            backend.emu_stop(TaskStatus::X, emulator)
-                .expect("failed to stop emulator");
-            panic!("Unsupported syscall: {:?}", nr);
+            syscalls::syscall_enosys(backend, emulator, nr);
         }
     };
 }
@@ -314,7 +413,7 @@ pub(crate) fn register_syscall_handler<T: Clone>(emu: &AndroidEmulator<T>) {
 
 pub fn get_syscall<T: Clone>(uc: &Backend<T>) -> Syscalls {
     let syscall = uc.reg_read(RegisterARM64::X8).unwrap();
-    unsafe { mem::transmute(syscall) }
+    Syscalls::from_u64(syscall)
 }
 
 #[repr(u64)]
@@ -600,6 +699,9 @@ pub enum Syscalls {
     __NR_pkey_free	 = 290,
     __NR_statx	 = 291,
     __NR_syscalls	 = 292,
+    __NR_rseq	 = 293,
+    __NR_clone3	 = 435,
+    __NR_faccessat2	 = 439,
     __NR_open	 = 1024,
     __NR_link	 = 1025,
     __NR_unlink	 = 1026,
@@ -687,5 +789,90 @@ pub enum Syscalls {
     // __NR_stat64	 = __NR3264_stat,
     // __NR_lstat64	 = __NR3264_lstat,
 
-    None,
+    Unknown = 0xffff_ffff_ffff,
+}
+
+impl Syscalls {
+    pub fn from_u64(nr: u64) -> Self {
+        match nr {
+            17 => Self::__NR_getcwd,
+            24 => Self::__NR_dup3,
+            43 => Self::__NR3264_statfs,
+            73 => Self::__NR_ppoll,
+            25 => Self::__NR3264_fcntl,
+            29 => Self::__NR_ioctl,
+            34 => Self::__NR_mkdirat,
+            38 => Self::__NR_renameat,
+            48 => Self::__NR_faccessat,
+            56 => Self::__NR_openat,
+            57 => Self::__NR_close,
+            59 => Self::__NR_pipe2,
+            61 => Self::__NR_getdents64,
+            62 => Self::__NR3264_lseek,
+            63 => Self::__NR_read,
+            64 => Self::__NR_write,
+            66 => Self::__NR_writev,
+            78 => Self::__NR_readlinkat,
+            79 => Self::__NR3264_fstatat,
+            80 => Self::__NR3264_fstat,
+            93 => Self::__NR_exit,
+            94 => Self::__NR_exit_group,
+            96 => Self::__NR_set_tid_address,
+            98 => Self::__NR_futex,
+            99 => Self::__NR_set_robust_list,
+            101 => Self::__NR_nanosleep,
+            113 => Self::__NR_clock_gettime,
+            115 => Self::__NR_clock_nanosleep,
+            122 => Self::__NR_sched_setaffinity,
+            123 => Self::__NR_sched_getaffinity,
+            124 => Self::__NR_sched_yield,
+            132 => Self::__NR_sigaltstack,
+            135 => Self::__NR_rt_sigprocmask,
+            160 => Self::__NR_uname,
+            167 => Self::__NR_prctl,
+            169 => Self::__NR_gettimeofday,
+            172 => Self::__NR_getpid,
+            173 => Self::__NR_getppid,
+            174 => Self::__NR_getuid,
+            175 => Self::__NR_geteuid,
+            178 => Self::__NR_gettid,
+            198 => Self::__NR_socket,
+            203 => Self::__NR_connect,
+            214 => Self::__NR_brk,
+            215 => Self::__NR_munmap,
+            220 => Self::__NR_clone,
+            222 => Self::__NR3264_mmap,
+            226 => Self::__NR_mprotect,
+            233 => Self::__NR_madvise,
+            278 => Self::__NR_getrandom,
+            283 => Self::__NR_membarrier,
+            291 => Self::__NR_statx,
+            293 => Self::__NR_rseq,
+            435 => Self::__NR_clone3,
+            439 => Self::__NR_faccessat2,
+            other => {
+                // Keep the original discriminant when it is a defined variant so
+                // existing match arms still work for less common numbers.
+                if other <= 291 || (other >= 1024 && other <= 1079) {
+                    unsafe { mem::transmute(other) }
+                } else {
+                    Self::Unknown
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Syscalls;
+
+    #[test]
+    fn known_syscall_numbers() {
+        assert!(matches!(Syscalls::from_u64(56), Syscalls::__NR_openat));
+        assert!(matches!(Syscalls::from_u64(94), Syscalls::__NR_exit_group));
+        assert!(matches!(Syscalls::from_u64(293), Syscalls::__NR_rseq));
+        assert!(matches!(Syscalls::from_u64(439), Syscalls::__NR_faccessat2));
+        assert!(matches!(Syscalls::from_u64(9999), Syscalls::Unknown));
+    }
 }

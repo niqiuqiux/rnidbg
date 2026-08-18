@@ -3,14 +3,15 @@
 set -e
 
 FILTER="grep -v warning"
+CXX=${CXX:=g++}
+CFLAGS_USER=${CFLAGS}
+CFLAGS_WARN="$(cat CFLAGS_WARN.cfg)"
 
 sub()
 {
+CFLAGS="$CFLAGS_USER $CFLAGS_WARN -I../ $OPT2"
 
-CFLAGS="-Wall -I../ $OPT2"
-CXX=${CXX:=g++}
-
-echo "compile address.cpp"
+echo $CXX $CFLAGS address.cpp -o address
 $CXX $CFLAGS address.cpp -o address
 
 ./address $1 > a.asm

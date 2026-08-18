@@ -39,7 +39,7 @@ impl<'a, T: Clone> Backend<'a, T> {
         }
 
         #[cfg(feature = "dynarmic_backend")]
-        if dynarmic::dynarmic_version() == 20240814 {
+        if dynarmic::dynarmic_version() == 20260819 {
             let dynarmic = Dynarmic::new();
 
             return Backend::Dynarmic(dynarmic)
@@ -200,6 +200,7 @@ impl<'a, T: Clone> Backend<'a, T> {
                     let index = reg_id.value() - RegisterARM64::X0.value();
                     dynarmic.reg_write_raw(index as usize, value)?;
                 }
+                260 => dynarmic.reg_write_pc(value)?,
                 262 => dynarmic.reg_write_tpidr_el0(value)?,
                 263 => dynarmic.reg_write_tpidrr0_el0(value)?,
                 _ => panic!("Invalid register: {:?}", reg_id)
@@ -239,6 +240,7 @@ impl<'a, T: Clone> Backend<'a, T> {
                         let index = reg_id.value() - RegisterARM64::X0.value();
                         dynarmic.reg_write_raw(index as usize, value)?;
                     }
+                    260 => dynarmic.reg_write_pc(value)?,
                     262 => dynarmic.reg_write_tpidr_el0(value)?,
                     263 => dynarmic.reg_write_tpidrr0_el0(value)?,
                     _ => panic!("Invalid register: {:?}", reg_id)
@@ -277,6 +279,7 @@ impl<'a, T: Clone> Backend<'a, T> {
                     let index = reg_id.value() - RegisterARM64::X0.value();
                     dynarmic.reg_write_raw(index as usize, value)?;
                 }
+                260 => dynarmic.reg_write_pc(value)?,
                 262 => dynarmic.reg_write_tpidr_el0(value)?,
                 263 => dynarmic.reg_write_tpidrr0_el0(value)?,
                 _ => panic!("Invalid register: {:?}", reg_id)

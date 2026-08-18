@@ -4,6 +4,7 @@
 #ifndef UNICORN_ARCH_POSTFIX
 #define UNICORN_ARCH_POSTFIX _s390x
 #endif
+#define gen_helper_check_exit_request gen_helper_check_exit_request_s390x
 #define unicorn_fill_tlb unicorn_fill_tlb_s390x
 #define reg_read reg_read_s390x
 #define reg_write reg_write_s390x
@@ -54,6 +55,7 @@
 #define vm_start vm_start_s390x
 #define address_space_dispatch_compact address_space_dispatch_compact_s390x
 #define flatview_translate flatview_translate_s390x
+#define flatview_copy flatview_copy_s390x
 #define address_space_translate_for_iotlb address_space_translate_for_iotlb_s390x
 #define qemu_get_cpu qemu_get_cpu_s390x
 #define cpu_address_space_init cpu_address_space_init_s390x
@@ -90,6 +92,7 @@
 #define iotlb_to_section iotlb_to_section_s390x
 #define address_space_dispatch_new address_space_dispatch_new_s390x
 #define address_space_dispatch_free address_space_dispatch_free_s390x
+#define address_space_dispatch_clear address_space_dispatch_clear_s390x
 #define flatview_read_continue flatview_read_continue_s390x
 #define address_space_read_full address_space_read_full_s390x
 #define address_space_write address_space_write_s390x
@@ -794,6 +797,7 @@
 #define get_page_addr_code get_page_addr_code_s390x
 #define probe_access probe_access_s390x
 #define tlb_vaddr_to_host tlb_vaddr_to_host_s390x
+#define tlb_vaddr_to_paddr tlb_vaddr_to_paddr_s390x
 #define helper_ret_ldub_mmu helper_ret_ldub_mmu_s390x
 #define helper_le_lduw_mmu helper_le_lduw_mmu_s390x
 #define helper_be_lduw_mmu helper_be_lduw_mmu_s390x
@@ -1287,6 +1291,9 @@
 #define gen_helper_vfp_set_fpscr gen_helper_vfp_set_fpscr_s390x
 #define gen_helper_cpsr_read gen_helper_cpsr_read_s390x
 #define gen_helper_cpsr_write gen_helper_cpsr_write_s390x
+#define tlb_reset_dirty_by_vaddr tlb_reset_dirty_by_vaddr_s390x
+#define helper_stqcx_le_parallel helper_stqcx_le_parallel_s390x
+#define helper_stqcx_be_parallel helper_stqcx_be_parallel_s390x
 #define helper_uc_s390x_exit helper_uc_s390x_exit_s390x
 #define tcg_s390_tod_updated tcg_s390_tod_updated_s390x
 #define tcg_s390_program_interrupt tcg_s390_program_interrupt_s390x
