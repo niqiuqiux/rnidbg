@@ -55,14 +55,12 @@ fn cmd_exec(args: &[String]) -> Result<i32> {
     let module_cell = emu.load_library(&bin, true)?;
     if let Some(code) = emu.last_exit_status() {
         info!("exited during load: {code}");
-        emu.destroy();
-        return Ok(code);
+        emulator::terminate_host(code);
     }
     let module = unsafe { &*module_cell.get() };
     let code = module.call_entry(&emu, &extra)?;
     info!("exit code: {code}");
-    emu.destroy();
-    Ok(code)
+    emulator::terminate_host(code);
 }
 
 fn cmd_jni(args: &[String]) -> Result<i32> {
@@ -80,8 +78,7 @@ fn cmd_jni(args: &[String]) -> Result<i32> {
     } else {
         info!("loaded {} base=0x{:x}", module.name, module.base);
     }
-    emu.destroy();
-    Ok(0)
+    emulator::terminate_host(0);
 }
 
 fn parse_flag_path<'a>(args: &'a [String], flag: &str) -> Result<(String, Vec<String>)> {

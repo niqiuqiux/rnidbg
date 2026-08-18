@@ -10,29 +10,40 @@ use std::rc::Rc;
 use ansi_term::Color;
 use anyhow::anyhow;
 use log::{error, warn};
-use crate::ffi::{DyHook, SFHook};
+use crate::ffi::SFHook;
 
 mod ffi;
 
 pub type DynarmicContext = Rc<DynarmicContextInner>;
 
-#[derive(Clone)]
+struct SvcHook<'a> {
+    func: Box<dyn FnMut(u32) + 'a>,
+}
+
+impl SFHook for SvcHook<'_> {}
+
 pub struct DynarmicContextInner {
     inner_context: *mut c_void,
 }
 
-impl DynarmicContextInner {
-    pub fn destroy(&self) {
-        unsafe {
-            ffi::dynarmic_context_free(self.inner_context);
+impl Drop for DynarmicContextInner {
+    fn drop(&mut self) {
+        let p = self.inner_context;
+        self.inner_context = null_mut();
+        if !p.is_null() {
+            unsafe {
+                ffi::dynarmic_context_free(p);
+            }
         }
     }
 }
 
-impl Drop for DynarmicContextInner {
-    fn drop(&mut self) {
-        self.destroy();
+unsafe extern "C" fn svc_c_trampoline(swi: u32, user_data: *const c_void) {
+    if user_data.is_null() || swi == 114514 {
+        return;
     }
+    let hook = unsafe { &mut *(user_data as *mut SvcHook) };
+    (hook.func)(swi);
 }
 
 pub fn dynarmic_version() -> u32 {
@@ -58,9 +69,13 @@ struct Metadata<'a> {
 
 impl Drop for Metadata<'_> {
     fn drop(&mut self) {
+        if self.handle.is_null() {
+            return;
+        }
         log::info!("[dynarmic] Dropping Metadata");
         unsafe {
             ffi::dynarmic_destroy(self.handle);
+            self.handle = null_mut();
         }
     }
 }
@@ -157,6 +172,21 @@ impl<'a, T: Clone> Dynarmic<'a, T> {
         }
     }
 
+    pub fn clear_cache(&self) {
+        unsafe {
+            ffi::dynarmic_clear_cache(self.cur_handle);
+        }
+    }
+
+    /// Leave guest mappings and the JIT to the OS. Needed on Windows where
+    /// tearing down a large Dynarmic instance after a long run can trip
+    /// `STATUS_HEAP_CORRUPTION`.
+    pub fn leak_native(&self) {
+        unsafe {
+            (*self.metadata.get()).handle = null_mut();
+        }
+    }
+
     pub fn context_alloc(&self) -> DynarmicContext {
         unsafe {
             let inner_context = ffi::dynarmic_context_alloc();
@@ -187,9 +217,7 @@ impl<'a, T: Clone> Dynarmic<'a, T> {
     }
 
     pub fn context_free(&self, context: DynarmicContext) {
-        unsafe {
-            ffi::dynarmic_context_free(context.inner_context);
-        }
+        drop(context);
     }
 
     pub fn mem_map(&self, addr: u64, size: usize, prot: u32) -> anyhow::Result<()> {
@@ -406,41 +434,34 @@ impl<'a, T: Clone> Dynarmic<'a, T> {
 
     pub fn set_svc_callback<F: 'a>(&self, callback: F)
     where
-        F: FnMut(&Dynarmic<T>, u32, u64, u64),
+        F: FnMut(&Dynarmic<T>, u32, u64, u64) + 'a,
     {
         if option_env!("DYNARMIC_DEBUG") == Some("1") {
             println!("{}[Dynarmic]{} Setting SVC callback", Color::Green.paint("[*]"), Color::White.paint(""));
         }
         unsafe {
-            let mut cb = Box::new(DyHook {
-                callback,
-                dy: self.clone(),
+            let dy = self.clone();
+            let mut callback = callback;
+            let mut hook = Box::new(SvcHook {
+                func: Box::new(move |swi| {
+                    let pc = ffi::reg_read_pc(dy.cur_handle);
+                    let until = (*dy.metadata.get()).until;
+                    callback(&dy, swi, until, pc);
+                }),
             });
-            let user_data = cb.as_mut() as *mut _ as *const c_void;
-            ffi::dynarmic_set_svc_callback(self.cur_handle, |swi, user_data| {
-                if swi == 114514 {
-                    return; // test
-                }
-                let cb = &mut *(user_data as *mut DyHook<T, F>);
-                let dynarmic = &cb.dy;
-                let pc = ffi::reg_read_pc(dynarmic.cur_handle);
-                let until = (*dynarmic.metadata.get()).until;
-
-                if option_env!("DYNARMIC_DEBUG") == Some("1") {
-                    println!("{}[Dynarmic]{} SVC callback: swi={}", Color::Green.paint("[*]"), Color::White.paint(""), swi);
-                }
-                //panic!("SVC callback is not implemented");
-                (cb.callback)(dynarmic, swi, until, pc);
-            }, user_data);
-            (*self.metadata.get()).svc_callback = Some(cb);
+            let user_data = hook.as_mut() as *mut SvcHook as *const c_void;
+            ffi::dynarmic_set_svc_callback(
+                self.cur_handle,
+                Some(svc_c_trampoline),
+                user_data,
+            );
+            (*self.metadata.get()).svc_callback = Some(hook);
         }
     }
 
     pub fn destroy_callback(&self) {
         unsafe {
-            ffi::dynarmic_set_svc_callback(self.cur_handle, |_, _| {
-                unreachable!("SVC callback should not be called after being destroyed");
-            }, null_mut());
+            ffi::dynarmic_set_svc_callback(self.cur_handle, None, null_mut());
             let callback = (*self.metadata.get()).svc_callback.take();
             drop(callback);
         }

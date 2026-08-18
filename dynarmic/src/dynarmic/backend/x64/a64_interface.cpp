@@ -21,6 +21,7 @@
 #include "dynarmic/common/x64_disassemble.h"
 #include "dynarmic/frontend/A64/translate/a64_translate.h"
 #include "dynarmic/interface/A64/a64.h"
+#include "dynarmic/interface/optimization_flags.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/opt/passes.h"
 
@@ -67,6 +68,10 @@ public:
 
     ~Impl() = default;
 
+    void ForceClearExecuting() {
+        is_executing = false;
+    }
+
     HaltReason Run() {
         ASSERT(!is_executing);
         PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
@@ -79,11 +84,16 @@ public:
         // TODO: Check code alignment
 
         const CodePtr current_code_ptr = [this] {
-            // RSB optimization
-            const u32 new_rsb_ptr = (jit_state.rsb_ptr - 1) & A64JitState::RSBPtrMask;
-            if (jit_state.GetUniqueHash() == jit_state.rsb_location_descriptors[new_rsb_ptr]) {
-                jit_state.rsb_ptr = new_rsb_ptr;
-                return reinterpret_cast<CodePtr>(jit_state.rsb_codeptrs[new_rsb_ptr]);
+            // Do not consume a stale RSB entry when the IR-level RSB
+            // optimization is off (cooperative thread switches).
+            if (conf.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
+                const u32 new_rsb_ptr = (jit_state.rsb_ptr - 1) & A64JitState::RSBPtrMask;
+                if (jit_state.GetUniqueHash() == jit_state.rsb_location_descriptors[new_rsb_ptr]) {
+                    jit_state.rsb_ptr = new_rsb_ptr;
+                    return reinterpret_cast<CodePtr>(jit_state.rsb_codeptrs[new_rsb_ptr]);
+                }
+            } else {
+                jit_state.ResetRSB();
             }
 
             return GetCurrentBlock();
@@ -446,6 +456,10 @@ void Jit::ClearExclusiveState() {
 
 bool Jit::IsExecuting() const {
     return impl->IsExecuting();
+}
+
+void Jit::ForceClearExecuting() {
+    impl->ForceClearExecuting();
 }
 
 void Jit::DumpDisassembly() const {

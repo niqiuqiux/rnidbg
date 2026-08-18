@@ -1053,7 +1053,12 @@ pub fn syscall_exit<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T
             if option_env!("PRINT_SYSCALL_LOG") == Some("1") {
                 println!("syscall exit(status={}) by ThreadTask", status);
             }
+            let ctid = task.child_tid_addr();
             task.set_exit_status(status);
+            // CLONE_CHILD_CLEARTID: write 0 (in set_exit_status) then wake joiners.
+            if ctid != 0 {
+                let _ = emulator.inner_mut().thread_dispatcher.wake_futex(ctid, u32::MAX);
+            }
             emulator.emu_stop(TaskStatus::X).unwrap();
             return;
         }
@@ -1062,7 +1067,7 @@ pub fn syscall_exit<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T
                 println!("syscall exit(status={}) by main task", status);
             }
             emulator.inner_mut().exit_status = Some(status);
-            emulator.emu_stop(TaskStatus::X).unwrap();
+            crate::terminate_host(status);
         }
     }
 }
@@ -1073,7 +1078,9 @@ pub fn syscall_exit_group<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmul
     let caller = emulator.find_caller_name();
     warn!("syscall exit_group(status={}) lr=0x{:x} from {}", status, lr, caller);
     emulator.inner_mut().exit_status = Some(status);
-    emulator.emu_stop(TaskStatus::X).unwrap();
+    // Do not return into the JIT or run CRT teardown.
+    let _ = backend;
+    crate::terminate_host(status);
 }
 
 pub fn syscall_bionic_clone<'a, T: Clone>(backend: &Backend<'a, T>, emulator: &AndroidEmulator<'a, T>) {
@@ -1385,7 +1392,7 @@ pub fn syscall_sched_yield<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmu
 }
 
 pub fn syscall_sched_getaffinity<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
-    let cpusetsize = ldr_u64!(backend, X1) as usize;
+    let cpusetsize = (ldr_u64!(backend, X1) as usize).min(128);
     let mask = ldr_u64!(backend, X2);
     if mask != 0 && cpusetsize > 0 {
         let mut bits = vec![0u8; cpusetsize];
@@ -1488,10 +1495,14 @@ pub fn syscall_writev<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator
         throw_err!(backend, emulator, Errno::EINVAL);
     }
 
+    if iovcnt > 1024 {
+        throw_err!(backend, emulator, Errno::EINVAL);
+    }
+
     let mut total = 0i64;
     for i in 0..iovcnt as u64 {
         let base = backend.mem_read_u64(iov + i * 16).unwrap_or(0);
-        let len = backend.mem_read_u64(iov + i * 16 + 8).unwrap_or(0) as usize;
+        let len = (backend.mem_read_u64(iov + i * 16 + 8).unwrap_or(0) as usize).min(1 << 20);
         if len == 0 {
             continue;
         }
@@ -1596,7 +1607,7 @@ pub fn syscall_dup3<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T
 
 pub fn syscall_getrandom<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
     let buf = ldr_u64!(backend, X0);
-    let buflen = ldr_u64!(backend, X1) as usize;
+    let buflen = (ldr_u64!(backend, X1) as usize).min(1 << 16);
     let _flags = ldr_u32!(backend, X2);
     let mut data = vec![0u8; buflen];
     for b in data.iter_mut() {

@@ -114,7 +114,7 @@ impl<'a, T: Clone> Task<'a, T> for BaseMainTask<'a, T>  {
     }
 
     fn is_finish(&self) -> bool {
-        false
+        self.get_task_status() == TaskStatus::X
     }
 
     fn add_signal_task(&mut self, task: SignalTask<'a, T>) {

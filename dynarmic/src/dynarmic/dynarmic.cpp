@@ -6,6 +6,8 @@
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "ConstantConditionsOC"
 #if defined(_WIN32) || defined(_WIN64)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include "mman.h"
 #include <errno.h>
 #else
@@ -46,6 +48,7 @@ public:
             : memory{memory} {}
 
     bool mem_fault = false;
+    bool user_stop = false;
     u64 ticks_remaining = 0x10000000000ULL;
 
     void Fault(const char *kind, u64 vaddr) {
@@ -279,7 +282,7 @@ typedef struct dynarmic {
 } *t_dynarmic;
 
 FQL int dynarmic_version() {
-    return 20260819;
+    return 20260820;
 }
 
 FQL const char* dynarmic_colorful_egg() {
@@ -335,7 +338,9 @@ FQL dynarmic* dynarmic_new(
     Dynarmic::A64::UserConfig config;
     // Cooperative guest threads invalidate return-stack predictions.
     config.optimizations = Dynarmic::all_safe_optimizations
-        & ~Dynarmic::OptimizationFlag::ReturnStackBuffer;
+        & ~Dynarmic::OptimizationFlag::ReturnStackBuffer
+        & ~Dynarmic::OptimizationFlag::BlockLinking
+        & ~Dynarmic::OptimizationFlag::FastDispatch;
     config.callbacks = callbacks;
     config.tpidrro_el0 = &callbacks->tpidrro_el0;
     config.tpidr_el0 = &callbacks->tpidr_el0;
@@ -407,8 +412,11 @@ FQL void dynarmic_destroy(dynarmic *dynarmic) {
     }
     // Tear the JIT down before unmapping guest pages; its destructor
     // still walks cached blocks that point at those host pages.
-    delete dynarmic->jit64;
-    dynarmic->jit64 = nullptr;
+    if (dynarmic->jit64) {
+        dynarmic->jit64->ClearCache();
+        delete dynarmic->jit64;
+        dynarmic->jit64 = nullptr;
+    }
     delete dynarmic->cb64;
     dynarmic->cb64 = nullptr;
     khash_t(memory) *memory = dynarmic->memory;
@@ -431,6 +439,12 @@ FQL void dynarmic_destroy(dynarmic *dynarmic) {
     }
     delete dynarmic->monitor;
     free(dynarmic);
+}
+
+FQL void dynarmic_clear_cache(dynarmic *dynarmic) {
+    if (dynarmic && dynarmic->jit64) {
+        dynarmic->jit64->ClearCache();
+    }
 }
 
 FQL void dynarmic_set_svc_callback(dynarmic *dynarmic, cb_call_svc cb, void* user_data) {
@@ -698,6 +712,53 @@ FQL u64 reg_read(dynarmic* dynarmic, u64 index) {
     return dynarmic->jit64->GetRegister(index);
 }
 
+#if defined(_WIN32)
+// x64 SEH cannot unwind through JIT frames (no RUNTIME_FUNCTION). A
+// first-chance VEH can still recover from an access violation in Run().
+static PVOID g_veh_handle = nullptr;
+static thread_local CONTEXT g_escape_ctx;
+static thread_local volatile int g_escape_armed = 0;
+static thread_local volatile int g_escape_hit = 0;
+
+static LONG CALLBACK jit_veh(EXCEPTION_POINTERS *ep) {
+    if (!g_escape_armed) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    g_escape_armed = 0;
+    g_escape_hit = (int)code;
+    RtlRestoreContext(&g_escape_ctx, nullptr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static int run_once_seh(Dynarmic::A64::Jit *cpu, Dynarmic::HaltReason *out_hr) {
+    __try {
+        *out_hr = cpu->Run();
+        return 0;
+    } __except (1) {
+        fprintf(stderr, "dynarmic Run access violation pc=%p\n",
+                (void *) cpu->GetPC());
+        fflush(stderr);
+        return -5;
+    }
+}
+#else
+static int run_once_seh(Dynarmic::A64::Jit *cpu, Dynarmic::HaltReason *out_hr) {
+    try {
+        *out_hr = cpu->Run();
+        return 0;
+    } catch (...) {
+        fprintf(stderr, "dynarmic Run exception pc=%p\n",
+                (void *) cpu->GetPC());
+        fflush(stderr);
+        return -5;
+    }
+}
+#endif
+
 FQL int dynarmic_emu_start(dynarmic* dynarmic, u64 pc) {
     if (!dynarmic) {
         return -1;
@@ -707,42 +768,45 @@ FQL int dynarmic_emu_start(dynarmic* dynarmic, u64 pc) {
     }
     Dynarmic::A64::Jit *cpu = dynarmic->jit64;
     dynarmic->cb64->mem_fault = false;
+    dynarmic->cb64->user_stop = false;
     // ~80M IR ticks is far above a syscall body and below a livelock.
     dynarmic->cb64->ticks_remaining = 80'000'000ULL;
     cpu->ClearExclusiveState();
     if (dynarmic->monitor) {
         dynarmic->monitor->Clear();
     }
+    // Leave CacheInvalidation set so Run() actually evacuates the cache
+    // and resets the RSB. Clearing it here made ClearCache() a no-op.
     cpu->ClearHalt(Dynarmic::HaltReason::UserDefined1);
     cpu->ClearHalt(Dynarmic::HaltReason::UserDefined2);
-    cpu->ClearHalt(Dynarmic::HaltReason::CacheInvalidation);
     cpu->ClearHalt(Dynarmic::HaltReason::MemoryAbort);
     cpu->ClearHalt(Dynarmic::HaltReason::Step);
     cpu->SetPC(pc);
+
+#if defined(_WIN32)
+    if (!g_veh_handle) {
+        g_veh_handle = AddVectoredExceptionHandler(1, jit_veh);
+    }
+    g_escape_hit = 0;
+    RtlCaptureContext(&g_escape_ctx);
+    if (g_escape_hit) {
+        cpu->ForceClearExecuting();
+        fprintf(stderr, "dynarmic VEH recovered code=0x%x pc=%p\n",
+                g_escape_hit, (void *) cpu->GetPC());
+        fflush(stderr);
+        return -5;
+    }
+    g_escape_armed = 1;
+#endif
+
     int rc = -4;
     for (int i = 0; i < 1024; i++) {
-        Dynarmic::HaltReason hr;
-#if defined(_WIN32)
-        __try {
-            hr = cpu->Run();
-        } __except (1) {
-            fprintf(stderr, "dynarmic Run access violation pc=%p\n",
-                    (void *) cpu->GetPC());
-            fflush(stderr);
-            rc = -5;
+        Dynarmic::HaltReason hr{};
+        int seh = run_once_seh(cpu, &hr);
+        if (seh != 0) {
+            rc = seh;
             break;
         }
-#else
-        try {
-            hr = cpu->Run();
-        } catch (...) {
-            fprintf(stderr, "dynarmic Run exception pc=%p\n",
-                    (void *) cpu->GetPC());
-            fflush(stderr);
-            rc = -5;
-            break;
-        }
-#endif
         if (dynarmic->cb64->mem_fault || Dynarmic::Has(hr, Dynarmic::HaltReason::MemoryAbort)) {
             rc = -3;
             break;
@@ -754,13 +818,21 @@ FQL int dynarmic_emu_start(dynarmic* dynarmic, u64 pc) {
             rc = -6;
             break;
         }
+        // A user Halt (futex / exit) wins over a pending cache flush.
+        if (Dynarmic::Has(hr, Dynarmic::HaltReason::UserDefined1)
+            || Dynarmic::Has(hr, Dynarmic::HaltReason::UserDefined2)) {
+            rc = 0;
+            break;
+        }
         if (Dynarmic::Has(hr, Dynarmic::HaltReason::CacheInvalidation)) {
-            cpu->ClearHalt(Dynarmic::HaltReason::CacheInvalidation);
             continue;
         }
         rc = 0;
         break;
     }
+#if defined(_WIN32)
+    g_escape_armed = 0;
+#endif
     return rc;
 }
 
@@ -771,6 +843,7 @@ FQL int dynarmic_emu_stop(dynarmic* dynarmic) {
     if(!dynarmic->cb64) {
         return -2;
     }
+    dynarmic->cb64->user_stop = true;
     dynarmic->jit64->HaltExecution();
     return 0;
 }

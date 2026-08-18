@@ -18,7 +18,7 @@ Default CPU backend is **Dynarmic**. Unicorn 2.1.4 is optional.
 |------|------------|
 | `rnidbg exec --bin tests/fixtures/arm64/hello` | Freestanding `write` + `exit_group(0)` |
 | `rnidbg jni --so tests/fixtures/arm64/libnative.so --onload` | `JNI_OnLoad` returns a valid JNI version |
-| `rnidbg exec --bin tests/fixtures/arm64/test` | Guest reaches `exit_group(0)` after signals, `statfs`, `dl_iterate_phdr`, pthread/cond, properties. Host teardown can still hit Windows heap corruption (`0xC0000374`). Guest stdout is often empty because `exit_group` does not flush libc stdio. |
+| `rnidbg exec --bin tests/fixtures/arm64/test` | Signals, `statfs`, `dl_iterate_phdr`, pthread/cond handshake, properties. Host exits 0. On Windows a remaining-mutex deadlock after the child exits is unlocked then the host `TerminateProcess`es (resuming the JIT here used to AV). Guest stdout is often empty because `exit_group` does not flush libc stdio. |
 
 `fork` is a stub (fake child pid). `ls` / libc++ iostream init is not a supported target yet.
 

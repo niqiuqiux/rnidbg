@@ -39,7 +39,7 @@ impl<'a, T: Clone> Backend<'a, T> {
         }
 
         #[cfg(feature = "dynarmic_backend")]
-        if dynarmic::dynarmic_version() == 20260819 {
+        if dynarmic::dynarmic_version() == 20260820 {
             let dynarmic = Dynarmic::new();
 
             return Backend::Dynarmic(dynarmic)
@@ -74,6 +74,23 @@ impl<'a, T: Clone> Backend<'a, T> {
         }
 
         unreachable!()
+    }
+
+    #[inline]
+    pub fn clear_jit_cache(&self) {
+        #[cfg(feature = "dynarmic_backend")]
+        if let Backend::Dynarmic(dynarmic) = self {
+            dynarmic.clear_cache();
+        }
+    }
+
+    /// Drop native backend memory without running its destructor.
+    #[inline]
+    pub fn leak_native(&self) {
+        #[cfg(feature = "dynarmic_backend")]
+        if let Backend::Dynarmic(dynarmic) = self {
+            dynarmic.leak_native();
+        }
     }
 
     #[inline]

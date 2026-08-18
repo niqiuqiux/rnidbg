@@ -56,6 +56,10 @@ impl<'a, T: Clone> MarshmallowThread<'a, T> {
     pub fn set_tid_ptr(&mut self, tid_ptr: VMPointer<'a, T>) {
         self.tid_ptr = Some(tid_ptr);
     }
+
+    pub fn child_tid_addr(&self) -> u64 {
+        self.tid_ptr.as_ref().map(|p| p.addr).unwrap_or(0)
+    }
 }
 
 impl<'a, T: Clone> RunnableTask<'a, T> for MarshmallowThread<'a, T> {

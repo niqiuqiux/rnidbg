@@ -1,14 +1,6 @@
 use std::ffi::{c_char, c_void};
-use crate::Dynarmic;
 
 pub trait SFHook {}
-
-pub struct DyHook<'a, T: Clone, F> {
-    pub callback: F,
-    pub dy: Dynarmic<'a, T>,
-}
-
-impl<'a, T: Clone, F> SFHook for DyHook<'a, T, F> {}
 
 extern "C" {
     pub fn dynarmic_version() -> u32;
@@ -27,7 +19,13 @@ extern "C" {
 
     pub fn dynarmic_destroy(dynarmic: *mut c_void);
 
-    pub fn dynarmic_set_svc_callback(dynarmic: *mut c_void, cb: fn(swi: u32, user_data: *const c_void), user_data: *const c_void);
+    pub fn dynarmic_clear_cache(dynarmic: *mut c_void);
+
+    pub fn dynarmic_set_svc_callback(
+        dynarmic: *mut c_void,
+        cb: Option<unsafe extern "C" fn(swi: u32, user_data: *const c_void)>,
+        user_data: *const c_void,
+    );
 
     pub fn dynarmic_munmap(dynarmic: *mut c_void, address: u64, size: u64) -> i32;
 

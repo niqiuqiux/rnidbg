@@ -121,6 +121,9 @@ public:
      */
     bool IsExecuting() const;
 
+    /// Clear the in-callback flag after a longjmp out of Run().
+    void ForceClearExecuting();
+
     /// Debugging: Dump a disassembly all of compiled code to the console.
     void DumpDisassembly() const;
 

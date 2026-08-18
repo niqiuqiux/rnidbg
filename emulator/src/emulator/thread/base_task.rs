@@ -57,8 +57,8 @@ impl <'a, T: Clone> BaseTask<'a, T> {
         let lr = backend.reg_read(RegisterARM64::LR).unwrap_or(0);
         let x0 = backend.reg_read(RegisterARM64::X0).unwrap_or(0);
         let x8 = backend.reg_read(RegisterARM64::X8).unwrap_or(0);
-        // After Halt in a leaf `svc #0`, resume at LR. The wrapper's
-        // post-SVC CMN/RET is equivalent once X0 is set by the waiter.
+        // After Halt in a leaf `svc #0`, resume at LR. Returning into the
+        // post-SVC CMN/RET of the libc wrapper has been seen to AV the host.
         if lr != 0 && pc >= 4 {
             let mut insn = [0u8; 4];
             if backend.mem_read(pc - 4, &mut insn).is_ok() {
@@ -73,6 +73,9 @@ impl <'a, T: Clone> BaseTask<'a, T> {
             "continue_run pc=0x{:x} lr=0x{:x} x0=0x{:x} x8=0x{:x} until=0x{:x}",
             pc, lr, x0, x8, until
         );
+        // Drop block-link / RSB state from the previous cooperative slice.
+        // emu_start now leaves CacheInvalidation set so this actually runs.
+        backend.clear_jit_cache();
         if let Some(waiter) = &self.waiter {
             match waiter {
                 Waiter::FutexIndefinite(futex_waiter) => {

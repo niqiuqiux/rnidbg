@@ -74,6 +74,8 @@ FQL u64 dynarmic_get_cache_size(dynarmic* dynarmic);
 
 FQL void dynarmic_destroy(dynarmic *dynarmic);
 
+FQL void dynarmic_clear_cache(dynarmic *dynarmic);
+
 FQL void dynarmic_set_svc_callback(dynarmic *dynarmic, cb_call_svc cb, void* user_data);
 
 FQL int dynarmic_munmap(dynarmic* dynarmic, u64 address, u64 size);
