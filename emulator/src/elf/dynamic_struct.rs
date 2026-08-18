@@ -193,10 +193,14 @@ impl ElfDynamicStructure {
 
     pub fn so_name(&self, file_name: String) -> anyhow::Result<String> {
         let string_table = self.dt_string_table.get_value()?;
-        if self.so_name == -1 {
+        if self.so_name <= 0 {
             return Ok(file_name);
         }
-        Ok(string_table.get(self.so_name as usize))
+        let name = string_table.get(self.so_name as usize);
+        if name.is_empty() {
+            return Ok(file_name);
+        }
+        Ok(name)
     }
 
     pub fn needed_libraries(&self) -> anyhow::Result<Vec<String>> {

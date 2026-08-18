@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::hash::RandomState;
 use anyhow::anyhow;
 use indexmap::IndexMap;
+use log::info;
 use crate::backend::Backend;
 use crate::elf::parser::ElfFile;
 use crate::elf::symbol::ElfSymbol;
@@ -165,6 +166,18 @@ impl ModuleSymbol {
         };
         let pointer = VMPointer::new(self.relocation_addr, 0, backend.clone());
         pointer.write_u64(value)?;
+        if let Some(symbol) = self.symbol.as_ref() {
+            if let Ok(name) = symbol.name(elf_file) {
+                if name == "fwrite" || name == "puts" || name == "printf" || name == "setvbuf"
+                    || name == "write" || name == "stdout" || name == "__libc_init"
+                {
+                    info!(
+                        "reloc {} -> 0x{:x} at 0x{:x}",
+                        name, value, self.relocation_addr
+                    );
+                }
+            }
+        }
         Ok(())
     }
     

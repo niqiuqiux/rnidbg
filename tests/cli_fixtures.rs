@@ -78,6 +78,24 @@ fn jni_onload_ok() {
 }
 
 #[test]
+fn exec_printf_pie_prints_phrase_and_exits_0() {
+    require_sdk();
+    let bin = repo_root().join("tests/fixtures/arm64/printf");
+    assert!(bin.is_file(), "missing {}", bin.display());
+    for pass in 1..=2 {
+        let (code, stdout, stderr) = run(&["exec", "--bin", "tests/fixtures/arm64/printf"]);
+        assert_eq!(
+            code, 0,
+            "printf pie pass {pass} host exit {code}\nstdout={stdout}\nstderr={stderr}"
+        );
+        assert!(
+            stdout.contains("complete pie from rnidbg"),
+            "printf pie pass {pass} missing phrase\nstdout={stdout:?}\nstderr={stderr}"
+        );
+    }
+}
+
+#[test]
 fn exec_test_host_exits_0() {
     require_sdk();
     for pass in 1..=3 {

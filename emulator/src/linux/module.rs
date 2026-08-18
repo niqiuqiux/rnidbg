@@ -343,6 +343,10 @@ impl<'a, T: Clone> LinuxModule<'a, T> {
 
         let sp = kab.addr;
         let entry = self.base + self.entry_point;
+        info!(
+            "call_entry {} entry=0x{:x} sp=0x{:x}",
+            self.name, entry, sp
+        );
         let ret = emulator.e_entry(entry, sp);
         if let Some(status) = emulator.last_exit_status() {
             return Ok(status);

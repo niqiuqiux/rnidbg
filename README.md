@@ -18,6 +18,7 @@ Default CPU backend is **Dynarmic**. Unicorn 2.1.4 is optional.
 |------|------------|
 | `rnidbg exec --bin tests/fixtures/arm64/hello` | Freestanding `write` + `exit_group(0)` |
 | `rnidbg jni --so tests/fixtures/arm64/libnative.so --onload` | `JNI_OnLoad` returns a valid JNI version |
+| `rnidbg exec --bin tests/fixtures/arm64/printf` | Libc-linked PIE: bionic crt runs `main`, libc `write(1)` prints `complete pie from rnidbg`, host exit 0 |
 | `rnidbg exec --bin tests/fixtures/arm64/test` | Signals, `statfs`, `dl_iterate_phdr`, pthread/cond handshake, properties. Host exits 0. On Windows a remaining-mutex deadlock after the child exits is unlocked then the host `TerminateProcess`es (resuming the JIT here used to AV). Guest stdout is often empty because `exit_group` does not flush libc stdio. |
 
 `fork` is a stub (fake child pid). `ls` / libc++ iostream init is not a supported target yet.
@@ -142,6 +143,8 @@ that value so `TPIDR+8` is the `pthread*`, not the old Marshmallow `pthread+0xb0
 |------|--------|
 | `tests/fixtures/arm64/hello.c` | Freestanding `svc` `write` + `exit_group`. Build with NDK `aarch64-linux-android35-clang -nostdlib -static -Wl,-e,_start` |
 | `tests/fixtures/arm64/hello` | Prebuilt hello |
+| `tests/fixtures/arm64/printf.c` | Libc-linked PIE: `write(1, "complete pie from rnidbg\\n")` |
+| `tests/fixtures/arm64/printf` | Prebuilt PIE (NDK clang `-fPIE -pie`; runtime libc from `android/sdk36`) |
 | `tests/fixtures/arm64/libnative.so` | Minimal JNI `JNI_OnLoad` |
 | `tests/fixtures/arm64/test` | Device-style libc binary (signals, pthread, netlink, properties) |
 

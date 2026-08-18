@@ -1067,6 +1067,7 @@ pub fn syscall_exit<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T
                 println!("syscall exit(status={}) by main task", status);
             }
             emulator.inner_mut().exit_status = Some(status);
+            flush_bionic_stdio(backend, emulator);
             crate::terminate_host(status);
         }
     }
@@ -1078,8 +1079,8 @@ pub fn syscall_exit_group<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmul
     let caller = emulator.find_caller_name();
     warn!("syscall exit_group(status={}) lr=0x{:x} from {}", status, lr, caller);
     emulator.inner_mut().exit_status = Some(status);
+    flush_bionic_stdio(backend, emulator);
     // Do not return into the JIT or run CRT teardown.
-    let _ = backend;
     crate::terminate_host(status);
 }
 
@@ -1298,8 +1299,8 @@ pub fn syscall_write<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<
             throw_err!(backend, emulator, Errno::EACCES);
         }
 
-        if option_env!("PRINT_SYSCALL_LOG") == Some("1") {
-            println!("syscall write(fd={}, buf=0x{:x}, count={}) => {} from {}", fd, buf, count, written, from_module);
+        if fd <= 2 || option_env!("PRINT_SYSCALL_LOG") == Some("1") {
+            info!("syscall write(fd={}, count={}) => {} from {}", fd, count, written, from_module);
         }
 
         ret_u64!(backend, written as u64);
@@ -1622,10 +1623,161 @@ pub fn syscall_getrandom<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmula
 pub fn syscall_ioctl<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
     let fd = ldr_i32!(backend, X0);
     let cmd = ldr_u32!(backend, X1);
+    let arg = ldr_u64!(backend, X2);
+    const TCGETS: u32 = 0x5401;
+    const TIOCGWINSZ: u32 = 0x5413;
+    const TIOCGPGRP: u32 = 0x540F;
     if option_env!("PRINT_SYSCALL_LOG") == Some("1") {
-        println!("syscall ioctl(fd={}, cmd=0x{:x}) => ENOTTY", fd, cmd);
+        println!("syscall ioctl(fd={}, cmd=0x{:x}, arg=0x{:x})", fd, cmd, arg);
+    }
+    let _ = emulator;
+    // Report stdio as a tty so bionic line-buffers stdout. Then a
+    // printf("…\n") issues write(1) before exit_group.
+    if fd >= 0 && fd <= 2 {
+        match cmd {
+            TCGETS => {
+                if arg != 0 {
+                    let _ = backend.mem_write(arg, &[0u8; 64]);
+                }
+                ret_i32!(backend, 0);
+                return;
+            }
+            TIOCGWINSZ => {
+                if arg != 0 {
+                    let mut ws = [0u8; 8];
+                    ws[0..2].copy_from_slice(&24u16.to_le_bytes());
+                    ws[2..4].copy_from_slice(&80u16.to_le_bytes());
+                    let _ = backend.mem_write(arg, &ws);
+                }
+                ret_i32!(backend, 0);
+                return;
+            }
+            TIOCGPGRP => {
+                if arg != 0 {
+                    let _ = backend.mem_write(arg, &2667i32.to_le_bytes());
+                }
+                ret_i32!(backend, 0);
+                return;
+            }
+            _ => {}
+        }
     }
     throw_err!(backend, emulator, Errno::ENOTTY);
+}
+
+/// Drain bionic `FILE` write buffers.
+/// API 36 FILE is 152 bytes (BSD `__sFILE`):
+/// `_p`@0, `_flags`@16, `_file`@20, `_bf._base`@24. `__sglue` walks the list
+/// (`next`@0, `niobs`@8, `iobs`@16) the same way `fflush_all` does.
+fn flush_bionic_stdio<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
+    const __SWR: i32 = 0x0008;
+    let libc = {
+        let memory = &emulator.inner_mut().memory;
+        memory.modules.get("libc.so").cloned()
+    };
+    let Some(cell) = libc else {
+        return;
+    };
+    let module = unsafe { &*cell.get() };
+    if let Ok(sym) = module.find_symbol_by_name("__sglue", false) {
+        flush_sglue_chain(backend, emulator, sym.address());
+    }
+    for name in ["stdout", "stderr"] {
+        let Ok(sym) = module.find_symbol_by_name(name, false) else {
+            continue;
+        };
+        let Ok(maybe_ptr) = backend.mem_read_u64(sym.address()) else {
+            continue;
+        };
+        let fp = if maybe_ptr > 0x10000 && backend.mem_read_u64(maybe_ptr).is_ok() {
+            maybe_ptr
+        } else {
+            sym.address()
+        };
+        flush_one_file(backend, emulator, fp);
+    }
+}
+
+fn flush_sglue_chain<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>, mut glue: u64) {
+    for _ in 0..8 {
+        if glue == 0 {
+            break;
+        }
+        let Ok(niobs) = backend.mem_read_i32(glue + 8) else {
+            break;
+        };
+        let Ok(iobs) = backend.mem_read_u64(glue + 16) else {
+            break;
+        };
+        if iobs != 0 && niobs > 0 && niobs < 64 {
+            for i in 0..niobs as u64 {
+                flush_one_file(backend, emulator, iobs + i * 152);
+            }
+        }
+        let Ok(next) = backend.mem_read_u64(glue) else {
+            break;
+        };
+        if next == glue {
+            break;
+        }
+        glue = next;
+    }
+}
+
+fn flush_one_file<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>, fp: u64) {
+    const __SWR: i32 = 0x0008;
+    let Ok(p) = backend.mem_read_u64(fp) else {
+        return;
+    };
+    let Ok(flags) = backend.mem_read_i32(fp + 16) else {
+        return;
+    };
+    if flags == 0 || flags & 0x8000 != 0 || flags & __SWR == 0 {
+        return;
+    }
+    let Ok(file_no) = backend.mem_read_i32(fp + 20) else {
+        return;
+    };
+    let Ok(base) = backend.mem_read_u64(fp + 24) else {
+        return;
+    };
+    if p == 0 || base == 0 || p < base {
+        return;
+    }
+    let n = p.saturating_sub(base) as usize;
+    if n == 0 || n > 1 << 20 {
+        return;
+    }
+    let Ok(buf) = backend.mem_read_as_vec(base, n) else {
+        return;
+    };
+    write_guest_fd(emulator, file_no, &buf);
+    let _ = backend.mem_write(fp, &base.to_le_bytes());
+    info!("flushed FILE fp=0x{:x} fd={} {} bytes", fp, file_no, n);
+}
+
+fn write_guest_fd<T: Clone>(emulator: &AndroidEmulator<T>, fd: i32, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+    let file_system = &mut emulator.inner_mut().file_system;
+    if let Some(file) = file_system.get_file_mut(fd) {
+        match file {
+            FileIO::Bytes(f) => {
+                let _ = f.write(data);
+            }
+            FileIO::File(f) => {
+                let _ = f.write(data);
+            }
+            FileIO::Dynamic(f) => {
+                let _ = f.write(data);
+            }
+            FileIO::LocalSocket(s) => {
+                let _ = <LocalSocket as FileIOTrait<T>>::write(s, data);
+            }
+            FileIO::Error(_) | FileIO::Direction(_) => {}
+        }
+    }
 }
 
 pub fn syscall_set_robust_list<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
