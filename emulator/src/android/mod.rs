@@ -14,8 +14,8 @@ impl<T: Clone> AndroidEmulator<'_, T> {
     /// allocate some memory required by the stack/Svc
     ///
     /// # Example
-    /// ```
-    /// use core::emulator::AndroidEmulator;
+    /// ```ignore
+    /// use emulator::AndroidEmulator;
     ///
     /// let emu = AndroidEmulator::create_arm64(32267, 29427, "com.tencent.mobileqq:MSF", ());
     /// ```

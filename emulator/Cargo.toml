@@ -8,7 +8,7 @@ edition = "2021"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["dynarmic_backend"]
 unicorn_backend = ["unicorn-engine", "unicorn-engine/arch_aarch64", "big_address"]
 dynarmic_backend = ["dynarmic"]
 big_address = []

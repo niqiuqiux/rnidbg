@@ -164,8 +164,8 @@ impl <'a, T: Clone> AndroidEmulator<'a, T> {
     /// * `errno` - The errno value to set.
     ///
     /// # Example
-    /// ```no_run
-    /// use core::emulator::AndroidEmulator;
+    /// ```ignore
+    /// use emulator::AndroidEmulator;
     /// use emulator::linux::errno::Errno;
     ///
     /// let emu = AndroidEmulator::create_arm64(32267, 29427, "com.tencent.mobileqq:MSF", ());

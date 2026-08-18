@@ -234,37 +234,39 @@ impl<'a, T: Clone> Backend<'a, T> {
         reg_id: RegisterARM64,
         value: i64
     ) -> anyhow::Result<()> {
-        match self {
-            #[cfg(feature = "unicorn_backend")]
-            Backend::Unicorn(unicorn) => {
-                unicorn.reg_write_i64(reg_id, value)
-                    .map_err(|e| anyhow!("reg_write_i64 failed: {:?}", e))
-            }
-            #[cfg(feature = "dynarmic_backend")]
-            Backend::Dynarmic(dynarmic) => {
-                let value = unsafe { std::mem::transmute::<i64, u64>(value) };
-                match reg_id.value() {
-                    0 => panic!("Invalid register: {:?}", reg_id),
-                    1 => dynarmic.reg_write_raw(29, value)?,
-                    2 => dynarmic.reg_write_lr(value)?,
-                    3 => dynarmic.reg_write_nzcv(value)?,
-                    4 => dynarmic.reg_write_sp(value)?,
-                    168..=196 => {
-                        let index = reg_id.value() - RegisterARM64::W0.value();
-                        dynarmic.reg_write_raw(index as usize, value)?;
-                    }
-                    199..=227 => {
-                        let index = reg_id.value() - RegisterARM64::X0.value();
-                        dynarmic.reg_write_raw(index as usize, value)?;
-                    }
-                    260 => dynarmic.reg_write_pc(value)?,
-                    262 => dynarmic.reg_write_tpidr_el0(value)?,
-                    263 => dynarmic.reg_write_tpidrr0_el0(value)?,
-                    _ => panic!("Invalid register: {:?}", reg_id)
-                }
-                Ok(())
-            }
+        #[cfg(feature = "unicorn_backend")]
+        if let Backend::Unicorn(unicorn) = self {
+            return unicorn.reg_write_i64(reg_id, value)
+                .map_err(|e| anyhow!("reg_write_i64 failed: {:?}", e));
         }
+
+        #[cfg(feature = "dynarmic_backend")]
+        if let Backend::Dynarmic(dynarmic) = self {
+            let value = unsafe { std::mem::transmute::<i64, u64>(value) };
+            match reg_id.value() {
+                0 => panic!("Invalid register: {:?}", reg_id),
+                1 => dynarmic.reg_write_raw(29, value)?,
+                2 => dynarmic.reg_write_lr(value)?,
+                3 => dynarmic.reg_write_nzcv(value)?,
+                4 => dynarmic.reg_write_sp(value)?,
+                168..=196 => {
+                    let index = reg_id.value() - RegisterARM64::W0.value();
+                    dynarmic.reg_write_raw(index as usize, value)?;
+                }
+                199..=227 => {
+                    let index = reg_id.value() - RegisterARM64::X0.value();
+                    dynarmic.reg_write_raw(index as usize, value)?;
+                }
+                260 => dynarmic.reg_write_pc(value)?,
+                262 => dynarmic.reg_write_tpidr_el0(value)?,
+                263 => dynarmic.reg_write_tpidrr0_el0(value)?,
+                _ => panic!("Invalid register: {:?}", reg_id)
+            }
+            return Ok(());
+        }
+
+        let _ = (reg_id, value);
+        unreachable!("Not supported backend")
     }
 
     #[inline]

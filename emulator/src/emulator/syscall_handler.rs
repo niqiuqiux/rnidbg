@@ -875,4 +875,15 @@ mod tests {
         assert!(matches!(Syscalls::from_u64(439), Syscalls::__NR_faccessat2));
         assert!(matches!(Syscalls::from_u64(9999), Syscalls::Unknown));
     }
+
+    #[test]
+    fn exit_group_dispatch_and_host_teardown() {
+        assert!(matches!(Syscalls::from_u64(94), Syscalls::__NR_exit_group));
+        let src = include_str!("../linux/syscalls.rs");
+        assert!(src.contains("pub fn syscall_exit_group"));
+        assert!(
+            src.contains("crate::terminate_host(status)"),
+            "exit_group must TerminateProcess the host instead of returning into the JIT"
+        );
+    }
 }

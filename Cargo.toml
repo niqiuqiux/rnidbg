@@ -17,7 +17,7 @@ unicorn = ["emulator/unicorn_backend"]
 dynarmic = ["emulator/dynarmic_backend"]
 
 [dependencies]
-emulator = { path = "emulator", version = "0.1.0", features = [] }
+emulator = { path = "emulator", version = "0.1.0", default-features = false }
 anyhow = "1.0.86"
 keystone-engine = { version = "0.1.0", features = ["build-from-src"] }
 hex = { version = "0.4.3", features = ["default"] }

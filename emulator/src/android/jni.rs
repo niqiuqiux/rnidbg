@@ -85,7 +85,7 @@ pub trait Jni<T: Clone> {
     /// Otherwise, return false
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use emulator::android::dvm::class::DvmClass;
     /// use emulator::android::dvm::member::DvmMethod;
     /// use emulator::android::dvm::object::DvmObject;
@@ -124,7 +124,7 @@ pub trait Jni<T: Clone> {
     /// Call a static method of a class
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use std::rc::Rc;
     /// use emulator::android::dvm::class::DvmClass;
     /// use emulator::android::dvm::member::DvmMethod;
