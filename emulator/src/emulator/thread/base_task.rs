@@ -12,9 +12,84 @@ use crate::backend::Context;
 
 const THREAD_STACK_SIZE: i32 = 0x80000;
 
+/// Guest GPRs owned in Rust. Dynarmic's malloc'd context blob has been
+/// seen to come back null after a worker slice on Windows.
+#[derive(Clone, Debug)]
+pub struct Arm64Snap {
+    pub x: [u64; 31],
+    pub sp: u64,
+    pub pc: u64,
+    pub nzcv: u64,
+    pub tpidr: u64,
+}
+
+fn gpr(i: usize) -> RegisterARM64 {
+    match i {
+        0 => RegisterARM64::X0,
+        1 => RegisterARM64::X1,
+        2 => RegisterARM64::X2,
+        3 => RegisterARM64::X3,
+        4 => RegisterARM64::X4,
+        5 => RegisterARM64::X5,
+        6 => RegisterARM64::X6,
+        7 => RegisterARM64::X7,
+        8 => RegisterARM64::X8,
+        9 => RegisterARM64::X9,
+        10 => RegisterARM64::X10,
+        11 => RegisterARM64::X11,
+        12 => RegisterARM64::X12,
+        13 => RegisterARM64::X13,
+        14 => RegisterARM64::X14,
+        15 => RegisterARM64::X15,
+        16 => RegisterARM64::X16,
+        17 => RegisterARM64::X17,
+        18 => RegisterARM64::X18,
+        19 => RegisterARM64::X19,
+        20 => RegisterARM64::X20,
+        21 => RegisterARM64::X21,
+        22 => RegisterARM64::X22,
+        23 => RegisterARM64::X23,
+        24 => RegisterARM64::X24,
+        25 => RegisterARM64::X25,
+        26 => RegisterARM64::X26,
+        27 => RegisterARM64::X27,
+        28 => RegisterARM64::X28,
+        29 => RegisterARM64::X29,
+        30 => RegisterARM64::LR,
+        _ => RegisterARM64::XZR,
+    }
+}
+
+fn capture_snap<T: Clone>(emulator: &AndroidEmulator<T>) -> Arm64Snap {
+    let b = &emulator.backend;
+    let mut x = [0u64; 31];
+    for i in 0..31 {
+        x[i] = b.reg_read(gpr(i)).unwrap_or(0);
+    }
+    Arm64Snap {
+        x,
+        sp: b.reg_read(RegisterARM64::SP).unwrap_or(0),
+        pc: b.reg_read(RegisterARM64::PC).unwrap_or(0),
+        nzcv: b.reg_read(RegisterARM64::NZCV).unwrap_or(0),
+        tpidr: b.reg_read(RegisterARM64::TPIDR_EL0).unwrap_or(0),
+    }
+}
+
+fn apply_snap<T: Clone>(emulator: &AndroidEmulator<T>, snap: &Arm64Snap) {
+    let b = &emulator.backend;
+    for i in 0..31 {
+        let _ = b.reg_write(gpr(i), snap.x[i]);
+    }
+    let _ = b.reg_write(RegisterARM64::SP, snap.sp);
+    let _ = b.reg_write(RegisterARM64::PC, snap.pc);
+    let _ = b.reg_write(RegisterARM64::NZCV, snap.nzcv);
+    let _ = b.reg_write(RegisterARM64::TPIDR_EL0, snap.tpidr);
+}
+
 pub struct BaseTask<'a, T: Clone> {
     pub waiter: Option<Waiter<'a, T>>,
     pub context: Option<Context>,
+    pub snap: Option<Arm64Snap>,
     pub stack_block: Option<MemoryBlock<'a, T>>,
     pub destroy_listener: Option<Box<dyn DestroyListener<'a, T>>>,
     pub stack: Vec<FunctionCall>,
@@ -27,6 +102,7 @@ impl <'a, T: Clone> BaseTask<'a, T> {
         Self {
             waiter: None,
             context: None,
+            snap: None,
             stack_block: None,
             destroy_listener: None,
             stack: Vec::new(),
@@ -49,8 +125,12 @@ impl <'a, T: Clone> BaseTask<'a, T> {
     pub fn continue_run(&mut self, emulator: &AndroidEmulator<'a, T>, until: u64) -> Option<u64> {
         let backend = emulator.backend.clone();
         if let Some(context) = &self.context {
-            backend.context_restore(context)
-                .expect("[continue_run] failed to restore context");
+            if let Err(e) = backend.context_restore(context) {
+                warn!("dynarmic context restore failed: {e}; using Arm64Snap");
+            }
+        }
+        if let Some(snap) = &self.snap {
+            apply_snap(emulator, snap);
         }
         let mut pc = backend.reg_read(RegisterARM64::PC)
             .expect("[continue_run] failed to get pc");
@@ -127,29 +207,40 @@ impl<'a, T: Clone> RunnableTask<'a, T> for BaseTask<'a, T> {
     }
 
     fn save_context(&mut self, emulator: &AndroidEmulator<'a, T>) {
+        self.snap = Some(capture_snap(emulator));
         let backend = emulator.backend.clone();
         let mut context = if let Some(context) = &self.context {
             context.clone()
         } else {
-            let context = backend.context_alloc()
-                .expect("failed to save context");
-            context
+            match backend.context_alloc() {
+                Ok(context) => context,
+                Err(e) => {
+                    warn!("context_alloc failed: {e}; snap only");
+                    return;
+                }
+            }
         };
-        backend.context_save(&mut context)
-            .expect("failed to save context");
+        if let Err(e) = backend.context_save(&mut context) {
+            warn!("context_save failed: {e}; snap only");
+            return;
+        }
         self.context = Some(context);
     }
 
     fn is_context_saved(&self) -> bool {
-        self.context.is_some()
+        self.snap.is_some() || self.context.is_some()
     }
 
     fn restore_context(&self, emulator: &AndroidEmulator<'a, T>) {
         if let Some(context) = &self.context {
-            emulator.backend.context_restore(context)
-                .expect("[restore_context] failed to restore context");
-        } else {
-            warn!("restore context failed, context is None")
+            if let Err(e) = emulator.backend.context_restore(context) {
+                warn!("restore_context: {e}");
+            }
+        }
+        if let Some(snap) = &self.snap {
+            apply_snap(emulator, snap);
+        } else if self.context.is_none() {
+            warn!("restore context failed, no snap or context")
         }
     }
 
