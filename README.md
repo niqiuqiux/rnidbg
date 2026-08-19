@@ -20,7 +20,7 @@ Default CPU backend is **Dynarmic**. Unicorn 2.1.4 is optional.
 | `rnidbg jni --so tests/fixtures/arm64/libnative.so --onload` | `JNI_OnLoad` returns a valid JNI version |
 | `rnidbg exec --bin tests/fixtures/arm64/printf` | Libc-linked PIE: bionic crt runs `main`, libc `write(1)` prints `complete pie from rnidbg`, host exit 0 |
 | `rnidbg exec --bin tests/fixtures/arm64/test` | Signals, `statfs`, `dl_iterate_phdr`, pthread/cond handshake, properties. Host exits 0. On Windows a remaining-mutex deadlock after the child exits is unlocked then the host `TerminateProcess`es (resuming the JIT here used to AV). Guest stdout is often empty because `exit_group` does not flush libc stdio. |
-| `rnidbg jni --so tests/fixtures/arm64/libhwdetect.so --call Java_…_runHardwareBreakpointCheck` | Loads the NDK SO, calls the JNI export, and returns the JSON report (`maxScore:280`). `R_AARCH64_ABS64` now applies RELA `r_addend` (needed for libc++ VTT / `stdout`). Guest `printf`/`puts` are hooked to `write(1)` so FILE* vfprintf does not trip stack-protector. `libandroid.so` is a virtual module by default. pthread children are queued but not preempted on Windows (resuming the JIT after `clone` AVs), so the report still scores 0 / “受限”. Host exit 0. |
+| `rnidbg jni --so tests/fixtures/arm64/libhwdetect.so --call Java_…_runHardwareBreakpointCheck` | Loads the NDK SO, calls the JNI export, and returns the JSON report (`maxScore:280`). Guest `usleep`/`nanosleep`/`sigaction` are hooked like `printf` so the parent can yield without resuming into libc's post-SVC `cmn` (that path AVs Windows Dynarmic). JNI worker threads skip `__pthread_start` and run `pthread+0x60`; the UE4 harness item scores 10/10 (`tid=2668/2669/2670`, heartbeat 3/3). `ptrace` attach / BP / WP are still stubs, so the remaining items stay 0 and the overall score is 10/280. Host exit 0. |
 
 `fork` is a stub (fake child pid). System `libc++.so` constructors are skipped when it is only a `DT_NEEDED` of `liblog`. Pull extra device libs with `android/sdk36/pull.ps1`; set `RNIDBG_REAL_LIBANDROID=1` to load the pulled `libandroid.so` instead of the stub.
 
@@ -137,7 +137,7 @@ that value so `TPIDR+8` is the `pthread*`, not the old Marshmallow `pthread+0xb0
 - Kernel argument block: argv, envp, auxv (`AT_PHDR`, `AT_HWCAP`, `AT_RANDOM`, …)
 - Virtual `__loader_*` / `dl_iterate_phdr` / `dlopen` family (fail-soft)
 - Syscalls used by SDK 36 bionic: `write`, `exit_group`, `mmap`/`mprotect`/`munmap`, `prctl`, `rt_sig*`, `clone` (bionic pthread), `futex` (`WAIT`/`WAKE` and `*_BITSET`), `clock_gettime`, `nanosleep`, `getrandom`, `faccessat`/`faccessat2`, `statfs`, `pipe2`, `sched_*`, `ppoll` (returns 0), …
-- Cooperative guest threads; deadlock recovery unlocks a contended mutex left by an exited thread
+- Cooperative guest threads; `usleep`/`nanosleep`/`sigaction` libc hooks Halt so siblings can run without resuming into a libc SVC epilogue; deadlock recovery unlocks a contended mutex left by an exited thread
 - JNI: `JNI_OnLoad`, `FindClass`, `RegisterNatives`, `NewObject` / `Call*Object` / `Call*Int` / `Call*Void` (instance and static). Remaining primitives and field accessors are fail-soft zeros
 - System properties: `__system_property_get` / `find` / `read` with bionic `prop_info` layout (`serial` high byte = value length)
 
@@ -151,6 +151,7 @@ that value so `TPIDR+8` is the `pthread*`, not the old Marshmallow `pthread+0xb0
 | `tests/fixtures/arm64/printf` | Prebuilt PIE (NDK clang `-fPIE -pie`; runtime libc from `android/sdk36`) |
 | `tests/fixtures/arm64/libnative.so` | Minimal JNI `JNI_OnLoad` |
 | `tests/fixtures/arm64/test` | Device-style libc binary (signals, pthread, netlink, properties) |
+| `tests/fixtures/arm64/libhwdetect.so` | NDK JNI SO: three UE4 worker threads + ptrace/hw-breakpoint report (`maxScore:280`) |
 
 ## Environment
 

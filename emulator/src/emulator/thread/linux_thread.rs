@@ -153,7 +153,19 @@ impl<'a, T: Clone> Task<'a, T> for MarshmallowThread<'a, T> {
             "MarshmallowThread start fn=0x{:x} pthread=0x{:x} routine=0x{:x} routine_arg=0x{:x} sp=0x{:x} tls=0x{:x}",
             self.fn_.addr, self.thread.addr, start_routine, start_arg, sp, tls
         );
-        backend.reg_write(RegisterARM64::X0, self.thread.addr)
+        // TLS_SLOT_THREAD_ID (slot 1) and stack canary (slot 5). JNI workers
+        // skip `__pthread_start`, so these must be primed here.
+        if tls != 0 {
+            let _ = backend.mem_write(tls + 8, &self.thread.addr.to_le_bytes());
+            let _ = backend.mem_write(tls + 0x28, &0xa5a5_a5a5_a5a5_a5a5u64.to_le_bytes());
+        }
+        let jni = emulator.inner_mut().dalvik.is_some();
+        let x0 = if jni && start_routine != 0 {
+            start_arg
+        } else {
+            self.thread.addr
+        };
+        backend.reg_write(RegisterARM64::X0, x0)
             .map_err(|e| anyhow!("[thread_addr] failed to write X0: {:?}", e))?;
         backend.reg_write(RegisterARM64::SP, sp)
             .map_err(|e| anyhow!("[stack_addr] failed to write SP: {:?}", e))?;
@@ -201,7 +213,22 @@ impl<'a, T: Clone> Task<'a, T> for MarshmallowThread<'a, T> {
 
 impl<'a, T: Clone> LuoTask<'a, T> for MarshmallowThread<'a, T> {
     fn run(&self, emulator: &AndroidEmulator<'a, T>) -> anyhow::Result<Option<u64>> {
-        let ret = emulator.emulate(self.fn_.addr, self.thread_task_mut().until);
+        // JNI-only: skip `__pthread_start` (TLS/SCS setup) and enter the
+        // `pthread+0x60` start_routine. Full `__pthread_start` has been seen
+        // to smash the host heap on Windows Dynarmic; exec fixtures still
+        // need it for stack-protector / handshake.
+        let mut pc = self.fn_.addr;
+        if emulator.inner_mut().dalvik.is_some() {
+            let routine = emulator.backend.mem_read_u64(self.thread.addr + 0x60).unwrap_or(0);
+            if routine != 0 {
+                log::info!(
+                    "MarshmallowThread JNI start_routine=0x{:x} skip __pthread_start=0x{:x}",
+                    routine, self.fn_.addr
+                );
+                pc = routine;
+            }
+        }
+        let ret = emulator.emulate(pc, self.thread_task_mut().until);
         if ret.is_some() {
             if let Some(tid_ptr) = &self.tid_ptr {
                 if tid_ptr.addr != 0 {

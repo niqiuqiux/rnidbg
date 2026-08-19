@@ -133,4 +133,16 @@ fn jni_hwdetect_loads_and_calls_export() {
         logs.contains("\"maxScore\":280") && logs.contains("\"items\":["),
         "JNI did not return the hardware-detect JSON report\n{logs}"
     );
+    // Three UE4 workers must actually run (prctl + gettid + heartbeat).
+    // Without the usleep yield they stay queued and the report scores 0/280.
+    for tid in ["tid=2668", "tid=2669", "tid=2670"] {
+        assert!(
+            logs.contains(tid),
+            "hwdetect missing worker {tid}\n{logs}"
+        );
+    }
+    assert!(
+        logs.contains("heartbeat=1"),
+        "hwdetect workers did not increment heartbeat\n{logs}"
+    );
 }

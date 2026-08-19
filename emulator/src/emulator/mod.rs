@@ -350,6 +350,31 @@ impl<'a, T: Clone> AndroidEmulator<'a, T> {
             .map_err(|e| anyhow!("failed to stop emulator: {:?}", e))
     }
 
+    /// Halt the current dispatcher slice so queued / sibling threads can run.
+    /// No-op outside the dispatcher (constructors) or when this is the only task.
+    pub(crate) fn yield_to_other_threads(&self) -> bool {
+        {
+            let inner = self.inner_mut();
+            if inner.context_task.is_none() {
+                return false;
+            }
+            if inner.thread_dispatcher.task_counts() <= 1 {
+                return false;
+            }
+            info!(
+                "yield_to_other_threads tasks={}",
+                inner.thread_dispatcher.task_counts()
+            );
+        }
+        match self.emu_stop(TaskStatus::S) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("yield_to_other_threads: {e}");
+                false
+            }
+        }
+    }
+
     pub fn e_func(&self, begin: u64, args: Vec<UnicornArg>) -> Option<u64> {
         let f64 = Function64::<T>::new(self.inner_mut().pid, begin, LR, args, false);
         while self.inner_mut().running.load(Ordering::SeqCst) {}

@@ -10,6 +10,7 @@ use crate::memory::svc_memory::{HookListener, SvcMemory};
 
 pub(super) mod system_properties;
 mod memory;
+mod sleep;
 mod string;
 
 pub struct Libc<'a, T> {
@@ -54,6 +55,10 @@ impl<'a, T: Clone> HookListener<'a, T> for Libc<'a, T> {
             "puts" => svc.register_svc(Box::new(string::Puts)),
             "fprintf" => svc.register_svc(Box::new(string::Fprintf)),
             "__printf_chk" => svc.register_svc(Box::new(string::PrintfChk)),
+            "usleep" => svc.register_svc(Box::new(sleep::Usleep)),
+            "nanosleep" => svc.register_svc(Box::new(sleep::Nanosleep)),
+            "clock_nanosleep" => svc.register_svc(Box::new(sleep::ClockNanosleep)),
+            "sigaction" | "__sigaction" => svc.register_svc(Box::new(sleep::Sigaction)),
             _ => 0
         };
 

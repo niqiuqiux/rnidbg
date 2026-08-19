@@ -1529,7 +1529,7 @@ pub fn syscall_nanosleep<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmula
     if rem != 0 {
         let _ = backend.mem_write(rem, &[0u8; 16]);
     }
-    let _ = emulator;
+    emulator.yield_to_other_threads();
     ret_i32!(backend, 0);
 }
 

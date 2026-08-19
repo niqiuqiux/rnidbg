@@ -1,6 +1,5 @@
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
-use std::ptr::read;
 use std::rc::Rc;
 use log::{debug, error, warn};
 use crate::emulator::AndroidEmulator;
@@ -515,6 +514,6 @@ impl<'a, T: Clone> ThreadDispatcher<'a, T> for UniThreadDispatcher<'a, T> {
     }
 
     fn running_task(&self) -> Option<Rc<UnsafeCell<AbstractTask<'a, T>>>> {
-        unsafe { read(self.running_task.get()) }
+        unsafe { (*self.running_task.get()).clone() }
     }
 }
