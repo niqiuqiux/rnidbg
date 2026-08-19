@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use ansi_term::Color;
 use anyhow::anyhow;
-use log::{error, warn};
+use log::{error, info, warn};
 use crate::backend::RegisterARM64;
 use sparse_list::SparseList;
 use crate::android::dvm::class::DvmClass;
@@ -20,7 +20,7 @@ use crate::android::dvm::jni_env_ext::initialize_env;
 use crate::android::dvm::member::{DvmField, DvmMember, DvmMethod};
 use crate::android::dvm::object::DvmObject;
 use crate::android::jni;
-use crate::android::jni::{Jni, JNI_FLAG_CLASS, JNI_FLAG_REF, JNI_FLAG_OBJECT, VaList, MethodAcc};
+use crate::android::jni::{Jni, JniValue, JNI_FLAG_CLASS, JNI_FLAG_REF, JNI_FLAG_OBJECT, VaList, MethodAcc};
 use crate::emulator::{AndroidEmulator, RcUnsafeCell};
 use crate::linux::LinuxModule;
 use crate::memory::svc_memory::{SimpleArm64Svc, SvcCallResult};
@@ -160,6 +160,62 @@ impl<'a, T: Clone> DalvikVM64<'a, T> {
             return Err(anyhow!("Call JNI_OnLoad failed: version={:x}", version));
         }
         Ok(())
+    }
+
+    /// Call a JNI `Java_*` export: `(JNIEnv *env, jobject thiz)`.
+    /// Extra JNI arguments are not passed — enough for the hwdetect entry.
+    pub fn call_jni_export(
+        &mut self,
+        emulator: AndroidEmulator<'a, T>,
+        module: &LinuxModule<T>,
+        symbol: &str,
+    ) -> anyhow::Result<JniValue> {
+        let fun = module.find_symbol_by_name(symbol, false)?;
+        let class = self
+            .resolve_class("java/lang/Object")
+            .map(|(_, c)| c)
+            .unwrap_or_else(|| Rc::new(DvmClass::new_class(-1, "java/lang/Object")));
+        let this_id = match class.new_simple_instance(self) {
+            DvmObject::ObjectRef(id) => id,
+            _ => 0,
+        };
+        info!(
+            "JNI call {} at 0x{:x} env=0x{:x} this=0x{:x}",
+            symbol,
+            fun.address(),
+            self.java_env,
+            this_id
+        );
+        let ret = fun.call(
+            &emulator,
+            vec![UnicornArg::Ptr(self.java_env), UnicornArg::I64(this_id)],
+        );
+        if let Some(code) = emulator.last_exit_status() {
+            return Err(anyhow!("guest exited {code} during {symbol}"));
+        }
+        let value = match ret {
+            None => JniValue::Null,
+            Some(raw) => {
+                let id = raw as i64;
+                let flag = jni::get_flag_id(id);
+                if flag == JNI_FLAG_OBJECT {
+                    self.get_local_ref(id)
+                        .cloned()
+                        .map(JniValue::Object)
+                        .unwrap_or(JniValue::Long(id))
+                } else if flag == JNI_FLAG_REF {
+                    self.get_global_ref(id)
+                        .cloned()
+                        .map(JniValue::Object)
+                        .unwrap_or(JniValue::Long(id))
+                } else if raw == 0 {
+                    JniValue::Null
+                } else {
+                    JniValue::Long(id)
+                }
+            }
+        };
+        Ok(value)
     }
 
     /// Local -> Object

@@ -91,7 +91,12 @@ impl<'a, T: Clone> MemoryBlockTrait<'a, T> for MemoryBlock<'a, T> {
             }
         } else {
             if let Some(emu) = emu {
-                emu.munmap(self.pointer.addr, self.pointer.size as u64).unwrap();
+                if let Err(e) = emu.munmap(self.pointer.addr, self.pointer.size as u64) {
+                    warn!(
+                        "free memory block munmap(0x{:x}, 0x{:x}) failed: {:?}",
+                        self.pointer.addr, self.pointer.size, e
+                    );
+                }
             } else {
                 warn!("free memory block failed: AndroidEmulator not found")
             }

@@ -369,6 +369,9 @@ fn syscall<'a, T: Clone>(nr: Syscalls, backend: &Backend<'a, T>, emulator: &Andr
         Syscalls::__NR_waitid => {
             syscalls::syscall_wait4(backend, emulator);
         }
+        Syscalls::__NR_ptrace => {
+            syscalls::syscall_ptrace(backend, emulator);
+        }
         _ => {
             syscalls::syscall_enosys(backend, emulator, nr);
         }

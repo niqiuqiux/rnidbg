@@ -67,11 +67,11 @@ impl<'a, T: Clone> LuoTask<'a, T> for Function64<'a, T> {
             info!("SP NOT 16 bytes aligned");
         }
 
-        let main_task = self.main_task_mut();
-        backend.reg_write(RegisterARM64::LR, main_task.until)
+        let until = self.main_task_mut().until;
+        backend.reg_write(RegisterARM64::LR, until)
             .expect("failed to write LR");
 
-        Ok(emulator.emulate(self.address, main_task.until))
+        Ok(emulator.emulate(self.address, until))
     }
 }
 

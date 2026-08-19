@@ -73,6 +73,7 @@ impl JniValue {
             JniValue::Long(l) => l.to_string(),
             JniValue::Float(f) => f.to_string(),
             JniValue::Double(d) => d.to_string(),
+            JniValue::Object(DvmObject::String(s)) => format!("\"{s}\""),
             JniValue::Object(_) => "object".to_string(),
             JniValue::Null => "null".to_string(),
         }

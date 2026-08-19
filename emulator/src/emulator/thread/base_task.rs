@@ -154,8 +154,25 @@ impl<'a, T: Clone> RunnableTask<'a, T> for BaseTask<'a, T> {
     }
 
     fn destroy(&self, emulator: &AndroidEmulator<'a, T>) {
+        let mut smash = false;
         if let Some(memory_block) = &self.stack_block {
-            memory_block.free(Some(emulator.clone()))
+            let addr = memory_block.pointer.addr;
+            let size = memory_block.pointer.size as u64;
+            // Guest TLS / heap smash has been seen to leave a garbage
+            // MemoryBlock (non-page address). Skip host munmap in that case.
+            if addr == 0 || addr & 0xfff != 0 || size == 0 || size > 0x100_0000 {
+                warn!(
+                    "skip stack_block free: addr=0x{:x} size=0x{:x}",
+                    addr, size
+                );
+                smash = true;
+            } else {
+                memory_block.free(Some(emulator.clone()))
+            }
+        }
+
+        if smash {
+            return;
         }
 
         if let Some(context) = &self.context {

@@ -200,7 +200,7 @@ impl<'a, T: Clone> LinuxModule<'a, T> {
             first, last, base, size
         );
 
-        let module = LinuxModule::new(
+        let mut module = LinuxModule::new(
             base,
             base,
             size,
@@ -216,7 +216,8 @@ impl<'a, T: Clone> LinuxModule<'a, T> {
             None,
             None,
         );
-
+        // unidbg `LinuxModule.registerSymbol` — DT_NEEDED resolution reads hook_map.
+        module.hook_map = symbol;
         module
     }
 
@@ -377,6 +378,14 @@ impl<'a, T: Clone> LinuxModule<'a, T> {
         emulator: &AndroidEmulator<'a, T>,
     ) -> anyhow::Result<()> {
         if !must_call_init && !self.unresolved_symbol.is_empty() {
+            return Ok(());
+        }
+
+        // libc++ `ios_base::Init` uses ELF TLS (TLSDESC) and has been seen to
+        // smash the host task struct. Not needed to bind liblog / JNI SOs.
+        if !must_call_init && self.name == "libc++.so" {
+            info!("skip libc++.so constructors (dependency)");
+            self.init_function_list.clear();
             return Ok(());
         }
 

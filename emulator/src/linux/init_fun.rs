@@ -61,8 +61,16 @@ impl<'a, T: Clone> InitFunctionTrait<'a, T> for AbsoluteInitFunction<'a, T> {
             address,
             address.saturating_sub(self.load_base)
         );
-        emu.e_func(address, vec![])
-            .ok_or(anyhow!("failed to call init function"))
+        match emu.e_func(address, vec![]) {
+            Some(ret) => Ok(ret),
+            None => {
+                error!(
+                    "[{}] init 0x{:x} did not finish; continuing",
+                    self.lib_name, address
+                );
+                Ok(0)
+            }
+        }
 
         //info!("CallInitFunction: addr=0x{:X}", address);
     }

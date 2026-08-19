@@ -1021,9 +1021,61 @@ pub fn syscall_rt_sigtimedwait<T: Clone>(backend: &Backend<T>, emulator: &Androi
 
 pub fn syscall_wait4<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
     let pid = ldr_i32!(backend, X0);
-    info!("syscall wait4/waitid(pid={}) => ECHILD", pid);
+    let wstatus = ldr_u64!(backend, X1);
+    let options = ldr_i32!(backend, X2);
+    // WIFSTOPPED(SIGSTOP): ((SIGSTOP << 8) | 0x7f)
+    const STOPPED_SIGSTOP: i32 = (19 << 8) | 0x7f;
+    let child = if pid <= 0 {
+        emulator.inner_mut().pid.saturating_add(1000) as i32
+    } else {
+        pid
+    };
+    info!(
+        "syscall wait4(pid={}, options={}) => stopped child {}",
+        pid, options, child
+    );
+    if wstatus != 0 {
+        let _ = backend.mem_write(wstatus, &STOPPED_SIGSTOP.to_le_bytes());
+    }
+    ret_i32!(backend, child);
+}
+
+pub fn syscall_ptrace<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
+    let request = ldr_u32!(backend, X0);
+    let pid = ldr_i32!(backend, X1);
+    let addr = ldr_u64!(backend, X2);
+    let data = ldr_u64!(backend, X3);
+    info!(
+        "syscall ptrace(request=0x{:x}, pid={}, addr=0x{:x}, data=0x{:x})",
+        request, pid, addr, data
+    );
+    const PTRACE_PEEKTEXT: u32 = 1;
+    const PTRACE_PEEKDATA: u32 = 2;
+    const PTRACE_PEEKUSER: u32 = 3;
+    const PTRACE_GETREGSET: u32 = 0x4204;
+    match request {
+        PTRACE_PEEKTEXT | PTRACE_PEEKDATA | PTRACE_PEEKUSER => {
+            if data != 0 {
+                let _ = backend.mem_write(data, &0u64.to_le_bytes());
+            }
+            ret_i32!(backend, 0);
+        }
+        PTRACE_GETREGSET => {
+            if data != 0 {
+                let iov_base = backend.mem_read_u64(data).unwrap_or(0);
+                let iov_len = backend.mem_read_u64(data + 8).unwrap_or(0).min(512);
+                if iov_base != 0 && iov_len > 0 {
+                    let zeros = vec![0u8; iov_len as usize];
+                    let _ = backend.mem_write(iov_base, &zeros);
+                }
+            }
+            ret_i32!(backend, 0);
+        }
+        _ => {
+            ret_i32!(backend, 0);
+        }
+    }
     let _ = emulator;
-    throw_err!(backend, emulator, Errno::ECHILD);
 }
 
 pub fn syscall_kill<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
@@ -1194,7 +1246,7 @@ pub fn syscall_faccessat<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmula
 
     if path == "/dev/null" || path == "/dev/urandom" || path == "/dev/zero"
         || path == "/proc/self/maps" || path == "/proc/meminfo" || path == "/proc/cpuinfo"
-        || path == "/proc/stat" || path == "/proc/self/exe"
+        || path == "/proc/stat" || path == "/proc/self/exe" || path == "/proc/self/status"
     {
         ret_i32!(backend, 0);
         return;
@@ -1806,6 +1858,10 @@ fn open<T: Clone>(emulator: &AndroidEmulator<T>, path: &str, flags: OFlag, mode:
         return (-errno, errno);
     }
 
+    let (pid, ppid, proc_name) = {
+        let inner = emulator.inner_mut();
+        (inner.pid, inner.ppid, inner.proc_name.clone())
+    };
     let file_system = &mut emulator.inner_mut().file_system;
     if path == "/dev/urandom" {
         let fd = file_system.insert_file(FileIO::Dynamic(Box::new(
@@ -1874,6 +1930,20 @@ fn open<T: Clone>(emulator: &AndroidEmulator<T>, path: &str, flags: OFlag, mode:
     if path == "/proc/self/maps" {
         let fd = file_system.insert_file(FileIO::Dynamic(Box::new(
             Maps::new(path, flags.bits())
+        )));
+        return (fd, 0)
+    }
+
+    if path == "/proc/self/status" {
+        let body = format!(
+            "Name:\t{proc_name}\nState:\tS (sleeping)\nTgid:\t{pid}\nPid:\t{pid}\nPPid:\t{ppid}\nTracerPid:\t0\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n"
+        );
+        let fd = file_system.insert_file(FileIO::Bytes(ByteArrayFileIO::new(
+            body.into_bytes(),
+            path.to_string(),
+            0,
+            flags.bits(),
+            StMode::SYSTEM_FILE,
         )));
         return (fd, 0)
     }

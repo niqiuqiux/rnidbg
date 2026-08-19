@@ -28,6 +28,14 @@ use crate::memory::svc_memory::HookListener;
 use crate::tool;
 use crate::tool::{align_addr, align_size, Alignment, get_segment_protection};
 
+/// Bytes from TPIDR_EL0 to the first ELF TLS byte. Bionic TCB slots occupy
+/// the low offsets (`__errno` is `*(TPIDR+8)+…`, stack canary is slot 5).
+const ELF_TLS_TPREL_BIAS: i64 = 0x100;
+
+fn elf_tls_tprel(symbol: Option<&ElfSymbol>, addend: i64) -> i64 {
+    ELF_TLS_TPREL_BIAS + symbol.map(|s| s.value as i64).unwrap_or(0) + addend
+}
+
 pub(crate) struct ModuleMemRegion {
     pub virtual_address: u64,
     pub begin: u64,
@@ -64,6 +72,7 @@ pub struct AndroidElfLoader<'a, T: Clone> {
     pub(crate) modules: IndexMap<String, RcUnsafeCell<LinuxModule<'a, T>>>,
     pub(crate) malloc: Option<LinuxSymbol>,
     pub(crate) free: Option<LinuxSymbol>,
+    tlsdesc_resolver: Option<u64>,
 }
 
 impl<'a, T: Clone> AndroidElfLoader<'a, T> {
@@ -89,6 +98,7 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
             malloc: None, free: None,
             temp_memory: HashMap::new(),
             cache_hook: HashMap::new(),
+            tlsdesc_resolver: None,
         };
         memory.set_stack_point(STACK_BASE);
 
@@ -112,6 +122,23 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
 
     pub fn set_mmap_base(&mut self, mmap_base: u64) {
         self.mmap_base = mmap_base;
+    }
+
+    /// Tiny RX stub: `ldr x0, [x0, #8]; ret` for `R_AARCH64_TLSDESC`.
+    fn ensure_tlsdesc_resolver(&mut self) -> u64 {
+        if let Some(addr) = self.tlsdesc_resolver {
+            return addr;
+        }
+        const STUB: u64 = 0xfffc0000;
+        let _ = self.backend.mem_map(
+            STUB,
+            PAGE_ALIGN,
+            (Permission::READ | Permission::EXEC).bits(),
+        );
+        // ldr x0, [x0, #8] ; ret
+        let _ = self.backend.mem_write(STUB, &[0x00, 0x04, 0x40, 0xf9, 0xc0, 0x03, 0x5f, 0xd6]);
+        self.tlsdesc_resolver = Some(STUB);
+        STUB
     }
 
     pub fn load_virtual_module(&mut self, name: String, symbols: std::collections::HashMap<String, u64>) -> RcUnsafeCell<LinuxModule<'a, T>> {
@@ -171,7 +198,11 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
     pub(crate) fn resolve_symbols(&mut self, show_warning: bool, emulator: &AndroidEmulator<'a, T>) -> anyhow::Result<()> {
         for (name, module_cell) in &self.modules {
             let m = unsafe { &mut *module_cell.get() };
-            let elf_file = unsafe { &*m.elf_file.as_ref().unwrap().get() };
+            let Some(elf_file_cell) = m.elf_file.as_ref() else {
+                // Virtual modules (libandroid.so, …) have no ELF.
+                continue;
+            };
+            let elf_file = unsafe { &*elf_file_cell.get() };
 
             let mut resolved_symbol = Vec::new();
             for module_symbol in &m.unresolved_symbol {
@@ -474,8 +505,24 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
                     relocation_addr.write_u64(resolved)?;
                 }
                 R_AARCH64_TLS_TPREL => {
-                    let tprel = symbol.as_ref().map(|s| s.value as i64).unwrap_or(0) + relocation.addend;
+                    let tprel = elf_tls_tprel(symbol.as_ref(), relocation.addend);
                     relocation_addr.write_u64(tprel as u64)?;
+                }
+                R_AARCH64_TLS_DTPMOD => {
+                    // Static TLS: one module id is enough for fail-soft libc++.
+                    relocation_addr.write_u64(1)?;
+                }
+                R_AARCH64_TLS_DTPREL => {
+                    let dtprel = symbol.as_ref().map(|s| s.value as i64).unwrap_or(0) + relocation.addend;
+                    relocation_addr.write_u64(dtprel as u64)?;
+                }
+                R_AARCH64_TLSDESC => {
+                    // Descriptor: [resolver, tprel]. Resolver returns the argument
+                    // (offset from TPIDR_EL0). Matches aarch64 TLSDESC static form.
+                    let tprel = elf_tls_tprel(symbol.as_ref(), relocation.addend);
+                    let resolver = self.ensure_tlsdesc_resolver();
+                    relocation_addr.write_u64(resolver)?;
+                    relocation_addr.write_u64_with_offset(8, tprel as u64)?;
                 }
                 R_AARCH64_COPY => {
                     panic!("R_AARCH64_COPY relocations are not supported")
@@ -781,7 +828,9 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
         argv.write_u64_with_offset(2 * 8, environ.addr)?;
         argv.write_u64_with_offset(3 * 8, auxv.addr)?;
 
-        let tls = self.allocate_stack(0x80 * 4); // tls size
+        // TCB slots live at TPIDR+0. ELF static TLS is placed after them
+        // (see `ELF_TLS_TPREL_BIAS`) so libc++ `.tbss` does not smash errno.
+        let tls = self.allocate_stack(0x2000); // tls size
         //tls.write_u64_with_offset(0, 0x11_45_14).unwrap();
         tls.write_u64_with_offset(8, thread.addr).unwrap();
         let errno = tls.share(8 * 2);

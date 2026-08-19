@@ -40,6 +40,8 @@ impl<T: Clone> AndroidEmulator<'_, T> {
 
         register_syscall_handler(&context);
 
+        virtual_library::lib_android::ensure_registered(&context);
+
         context.setup_traps()
             .map_err(|e| error!("failed to setup traps: {}", e))
             .unwrap();

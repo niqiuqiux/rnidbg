@@ -20,8 +20,9 @@ Default CPU backend is **Dynarmic**. Unicorn 2.1.4 is optional.
 | `rnidbg jni --so tests/fixtures/arm64/libnative.so --onload` | `JNI_OnLoad` returns a valid JNI version |
 | `rnidbg exec --bin tests/fixtures/arm64/printf` | Libc-linked PIE: bionic crt runs `main`, libc `write(1)` prints `complete pie from rnidbg`, host exit 0 |
 | `rnidbg exec --bin tests/fixtures/arm64/test` | Signals, `statfs`, `dl_iterate_phdr`, pthread/cond handshake, properties. Host exits 0. On Windows a remaining-mutex deadlock after the child exits is unlocked then the host `TerminateProcess`es (resuming the JIT here used to AV). Guest stdout is often empty because `exit_group` does not flush libc stdio. |
+| `rnidbg jni --so tests/fixtures/arm64/libhwdetect.so --call Java_…_runHardwareBreakpointCheck` | Missing `libandroid.so` is a virtual stub. The JNI export is invoked. Report formatting still hits libc++ iostream / TLS and fail-softs to `null`. Host exit 0. |
 
-`fork` is a stub (fake child pid). `ls` / libc++ iostream init is not a supported target yet.
+`fork` is a stub (fake child pid). System `libc++.so` constructors are skipped when it is only a `DT_NEEDED` of `liblog`. Static libc++ iostream inside a SO is not a supported target yet.
 
 ## Requirements
 
@@ -71,11 +72,14 @@ $env:RUST_LOG  = "info"
 
 # libc-linked fixture (signals / pthread / properties)
 .\target\debug\rnidbg.exe exec --bin tests\fixtures\arm64\test
+
+# NDK JNI SO without JNI_OnLoad
+.\target\debug\rnidbg.exe jni --so tests\fixtures\arm64\libhwdetect.so --call Java_com_niqiuqiux_androidhwdetect_MainActivity_runHardwareBreakpointCheck
 ```
 
 ```text
 rnidbg exec --bin <path> [--] [args...]
-rnidbg jni  --so  <path> [--onload]
+rnidbg jni  --so  <path> [--onload] [--call <Java_symbol>]
 ```
 
 Unicorn backend:

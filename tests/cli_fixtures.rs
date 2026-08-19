@@ -106,3 +106,27 @@ fn exec_test_host_exits_0() {
         );
     }
 }
+
+#[test]
+fn jni_hwdetect_loads_and_calls_export() {
+    require_sdk();
+    let so = repo_root().join("tests/fixtures/arm64/libhwdetect.so");
+    assert!(so.is_file(), "missing {}", so.display());
+    let (code, stdout, stderr) = run(&[
+        "jni",
+        "--so",
+        "tests/fixtures/arm64/libhwdetect.so",
+        "--call",
+        "Java_com_niqiuqiux_androidhwdetect_MainActivity_runHardwareBreakpointCheck",
+    ]);
+    let logs = format!("{stdout}{stderr}");
+    assert_eq!(code, 0, "hwdetect host exit {code}\n{logs}");
+    assert!(
+        logs.contains("loaded libhwdetect.so"),
+        "missing load line\n{logs}"
+    );
+    assert!(
+        logs.contains("JNI Java_com_niqiuqiux_androidhwdetect_MainActivity_runHardwareBreakpointCheck"),
+        "missing JNI call line\n{logs}"
+    );
+}
