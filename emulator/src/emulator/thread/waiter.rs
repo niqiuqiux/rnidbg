@@ -1,11 +1,16 @@
 use std::marker::PhantomData;
 use crate::emulator::AndroidEmulator;
 use crate::emulator::signal::{SignalTask};
-use crate::linux::thread::{FutexIndefinitelyWaiter, FutexNanoSleepWaiter};
+use crate::linux::thread::{
+    ChildExitWaiter, FutexIndefinitelyWaiter, FutexNanoSleepWaiter, PipeReadWaiter, PollWaiter,
+};
 
 pub enum Waiter<'a, T: Clone> {
     FutexIndefinite(FutexIndefinitelyWaiter<'a, T>),
     FutexNanoSleep(FutexNanoSleepWaiter<'a, T>),
+    PipeRead(PipeReadWaiter<'a, T>),
+    Poll(PollWaiter<'a, T>),
+    ChildExit(ChildExitWaiter),
     Unknown(PhantomData<&'a T>)
 }
 

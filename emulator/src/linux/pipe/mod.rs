@@ -74,6 +74,14 @@ impl<T: Clone> FileIOTrait<T> for PipeIO {
         &self.path
     }
 
+    fn pipe_reader_bufs(&self) -> Option<(Rc<RefCell<Vec<u8>>>, Rc<RefCell<usize>>)> {
+        if self.writer {
+            None
+        } else {
+            Some((self.buf.clone(), self.read_pos.clone()))
+        }
+    }
+
     fn oflags(&self) -> OFlag {
         OFlag::from_bits_truncate(self.oflags)
     }

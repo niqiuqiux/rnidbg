@@ -27,7 +27,7 @@ use crate::memory::AndroidElfLoader;
 use crate::memory::library_file::{ElfLibraryFile, LibraryFile};
 use crate::memory::svc_memory::SvcMemory;
 use crate::backend::Context;
-use std::cell::{RefCell, UnsafeCell};
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -82,6 +82,14 @@ pub(crate) struct AndroidEmulatorInner<'a, T: Clone> {
     pub ptrace_tracer: HashMap<i32, i32>,
     /// `PTRACE_GETREGSET`/`SETREGSET` blobs keyed by (tid, NT_*).
     pub ptrace_regset: HashMap<(i32, u32), Vec<u8>>,
+    /// Cooperative `fork` children: tid -> still-running / exit status.
+    pub fork_state: HashMap<i32, ForkState>,
+}
+
+#[derive(Clone)]
+pub struct ForkState {
+    pub alive: Rc<Cell<bool>>,
+    pub status: Rc<Cell<i32>>,
 }
 
 #[repr(C)]
@@ -128,6 +136,7 @@ impl <'a, T: Clone> AndroidEmulator<'a, T> {
                 exec_path: None,
                 ptrace_tracer: HashMap::new(),
                 ptrace_regset: HashMap::new(),
+                fork_state: HashMap::new(),
             })),
             backend
         })

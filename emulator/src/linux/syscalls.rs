@@ -1,6 +1,7 @@
 use std::ascii::AsciiExt;
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::ffi::c_long;
+use std::rc::Rc;
 use std::fmt::{format, Write as IGNORE};
 use std::io::Write;
 use std::mem;
@@ -14,7 +15,7 @@ use log::{error, info, warn};
 use crate::backend::{Backend, Permission};
 use crate::backend::RegisterARM64;
 use crate::backend::RegisterARM64::{*};
-use crate::emulator::{AndroidEmulator, AndroidEmulatorInner, HEAP_BASE};
+use crate::emulator::{AndroidEmulator, AndroidEmulatorInner, ForkState, HEAP_BASE};
 use crate::emulator::signal::{SignalOps, UnixSigSet};
 use crate::emulator::thread::{AbstractTask, MarshmallowThread, RunnableTask, Task, TaskStatus, ThreadDispatcher, Waiter, WaiterTrait};
 use crate::linux::errno::Errno;
@@ -33,7 +34,9 @@ use crate::linux::sock::local_socket::LocalSocket;
 use crate::linux::structs::{OFlag, prctl, Timespec, Timeval, Timezone, CloneFlag};
 use crate::linux::structs::prctl::PrctlOp;
 use crate::linux::structs::socket::{Pf, SockType};
-use crate::linux::thread::{FutexIndefinitelyWaiter, FutexNanoSleepWaiter};
+use crate::linux::thread::{
+    ChildExitWaiter, FutexIndefinitelyWaiter, FutexNanoSleepWaiter, PipeReadWaiter, PollWaiter,
+};
 use crate::pointer::VMPointer;
 
 macro_rules! throw_err {
@@ -60,6 +63,26 @@ macro_rules! ldr_i32 {
     ($backend:ident, $id:expr) => {
         $backend.reg_read($id).unwrap() as i32
     };
+}
+
+fn park_running_task<'a, T: Clone>(emulator: &AndroidEmulator<'a, T>, waiter: Waiter<'a, T>) {
+    let running = emulator.inner_mut().thread_dispatcher.running_task();
+    if let Some(cell) = running {
+        match unsafe { &mut *cell.get() } {
+            AbstractTask::Function64(task) => task.set_waiter(emulator, waiter),
+            AbstractTask::SignalTask(task) => task.set_waiter(emulator, waiter),
+            AbstractTask::MarshmallowThread(task) => task.set_waiter(emulator, waiter),
+            AbstractTask::KitKatThread(_) => {}
+        }
+        let _ = emulator.emu_stop(TaskStatus::S);
+    }
+}
+
+fn mark_fork_exit<T: Clone>(emulator: &AndroidEmulator<T>, tid: i32, status: i32) {
+    if let Some(st) = emulator.inner_mut().fork_state.get(&tid) {
+        st.status.set(status);
+        st.alive.set(false);
+    }
 }
 
 macro_rules! ldr_u32 {
@@ -303,7 +326,7 @@ pub fn syscall_futex<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<
                 info!("futex: set waiter: {:?}", match &waiter {
                     Waiter::FutexIndefinite(waiter) => waiter.can_dispatch().to_string() + "/",
                     Waiter::FutexNanoSleep(waiter) => waiter.can_dispatch().to_string() + "|",
-                    Waiter::Unknown(_) => unreachable!()
+                    _ => "?".into(),
                 });
             }
             match unsafe { &mut *running_task_cell.get() } {
@@ -639,6 +662,14 @@ pub fn syscall_close<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<
     }
 
     let file_system = &mut emulator.inner_mut().file_system;
+    // Fork children share the fd table. Parent `close` of unused pipe ends
+    // would steal the child's handshake/result fds, so keep pipe fds live.
+    if let Some(FileIO::Dynamic(f)) = file_system.get_file_mut(fd) {
+        if f.path().starts_with("pipe:") {
+            ret_i32!(backend, 0);
+            return;
+        }
+    }
     if let Some(file) = file_system.remove_file(fd) {
 /*        let running_task = emulator.inner_mut().thread_dispatcher
             .running_task_mut();
@@ -673,7 +704,7 @@ pub fn syscall_close<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<
     ret_i32!(backend, 0);
 }
 
-pub fn syscall_read<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
+pub fn syscall_read<'a, T: Clone>(backend: &Backend<'a, T>, emulator: &AndroidEmulator<'a, T>) {
     let fd = ldr_i32!(backend, X0);
     let buf = ldr_u64!(backend, X1);
     let count = ldr_i32!(backend, X2) as usize;
@@ -702,6 +733,10 @@ pub fn syscall_read<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T
             throw_err!(backend, emulator, Errno::EACCES);
         }
 
+        let pipe_bufs = match file {
+            FileIO::Dynamic(f) => f.pipe_reader_bufs(),
+            _ => None,
+        };
         let read = match file {
             FileIO::Bytes(file) => file.read(VMPointer::new(buf, 0, backend.clone()), count),
             FileIO::File(file) => file.read(VMPointer::new(buf, 0, backend.clone()), count),
@@ -713,6 +748,26 @@ pub fn syscall_read<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T
 
         if option_env!("PRINT_SYSCALL_LOG") == Some("1") {
             println!("syscall read(fd={}, buf=0x{:x}, count={}) => {} from {}", fd, buf, count, read, from_module);
+        }
+
+        if read == 0 {
+            if let Some((pbuf, pos)) = pipe_bufs {
+                if emulator.inner_mut().context_task.is_some()
+                    && emulator.inner_mut().thread_dispatcher.task_counts() > 1
+                {
+                    park_running_task(
+                        emulator,
+                        Waiter::PipeRead(PipeReadWaiter::new(
+                            pbuf,
+                            pos,
+                            buf,
+                            count,
+                            backend.clone(),
+                        )),
+                    );
+                    return;
+                }
+            }
         }
 
         ret_u64!(backend, read as u64);
@@ -1058,12 +1113,37 @@ pub fn syscall_rt_sigtimedwait<T: Clone>(backend: &Backend<T>, emulator: &Androi
     ret_i32!(backend, 2);
 }
 
-pub fn syscall_wait4<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
+pub fn syscall_wait4<'a, T: Clone>(backend: &Backend<'a, T>, emulator: &AndroidEmulator<'a, T>) {
     let pid = ldr_i32!(backend, X0);
     let wstatus = ldr_u64!(backend, X1);
     let options = ldr_i32!(backend, X2);
+    const WNOHANG: i32 = 1;
     // WIFSTOPPED(SIGSTOP): ((SIGSTOP << 8) | 0x7f)
     const STOPPED_SIGSTOP: i32 = (19 << 8) | 0x7f;
+
+    if pid > 0 {
+        if let Some(st) = emulator.inner_mut().fork_state.get(&pid).cloned() {
+            if !st.alive.get() {
+                let code = (st.status.get() & 0xff) << 8;
+                if wstatus != 0 {
+                    let _ = backend.mem_write(wstatus, &code.to_le_bytes());
+                }
+                info!("syscall wait4(pid={}) => exited {}", pid, st.status.get());
+                ret_i32!(backend, pid);
+                return;
+            }
+            if options & WNOHANG != 0 {
+                ret_i32!(backend, 0);
+                return;
+            }
+            park_running_task(
+                emulator,
+                Waiter::ChildExit(ChildExitWaiter::new(pid, wstatus, st.alive, st.status)),
+            );
+            return;
+        }
+    }
+
     let child = if pid <= 0 {
         emulator.inner_mut().pid.saturating_add(1000) as i32
     } else {
@@ -1198,6 +1278,7 @@ pub fn syscall_exit<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T
             if option_env!("PRINT_SYSCALL_LOG") == Some("1") {
                 println!("syscall exit(status={}) by ThreadTask", status);
             }
+            mark_fork_exit(emulator, task.get_id() as i32, status);
             let ctid = task.child_tid_addr();
             task.set_exit_status(status);
             // CLONE_CHILD_CLEARTID: write 0 (in set_exit_status) then wake joiners.
@@ -1222,6 +1303,22 @@ pub fn syscall_exit_group<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmul
     let status = ldr_i32!(backend, X0);
     let lr = emulator.get_lr().unwrap_or(0);
     let caller = emulator.find_caller_name();
+    if let Some(cell) = emulator.inner_mut().context_task.clone() {
+        if let AbstractTask::MarshmallowThread(task) = unsafe { &mut *cell.get() } {
+            warn!(
+                "syscall exit_group(status={}) lr=0x{:x} from {} (thread {})",
+                status, lr, caller, task.get_id()
+            );
+            mark_fork_exit(emulator, task.get_id() as i32, status);
+            let ctid = task.child_tid_addr();
+            task.set_exit_status(status);
+            if ctid != 0 {
+                let _ = emulator.inner_mut().thread_dispatcher.wake_futex(ctid, u32::MAX);
+            }
+            emulator.emu_stop(TaskStatus::X).unwrap();
+            return;
+        }
+    }
     warn!("syscall exit_group(status={}) lr=0x{:x} from {}", status, lr, caller);
     emulator.inner_mut().exit_status = Some(status);
     flush_bionic_stdio(backend, emulator);
@@ -1317,12 +1414,55 @@ pub fn syscall_pthread_clone<'a, T: Clone>(
 }
 
 #[inline]
-pub fn syscall_fork<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
-    // Pretend the parent survived and the child vanished. Constructors that
-    // probe clone/fork then keep running in the parent.
-    let child = emulator.inner_mut().pid.saturating_add(1000) as i32;
-    warn!("fork is stubbed: returning child pid {}", child);
-    ret_i32!(backend, child);
+pub fn syscall_fork<'a, T: Clone>(backend: &Backend<'a, T>, emulator: &AndroidEmulator<'a, T>) {
+    let child_id = emulator
+        .inner_mut()
+        .task_id_factory
+        .fetch_add(1, Ordering::SeqCst) as i32;
+    let mut snap = crate::emulator::thread::capture_snap(emulator);
+    snap.x[0] = 0;
+
+    const COPY: u64 = 0x40000;
+    let src = snap.sp.saturating_sub(COPY);
+    let Ok(block) = emulator.malloc((COPY + 0x1000) as usize, false) else {
+        warn!("fork stack copy failed; stub child pid {}", child_id);
+        ret_i32!(backend, child_id);
+        return;
+    };
+    let mut buf = vec![0u8; (COPY + 0x1000) as usize];
+    let _ = backend.mem_read(src, &mut buf);
+    let _ = backend.mem_write(block.pointer.addr, &buf);
+    let delta = block.pointer.addr.wrapping_sub(src);
+    snap.sp = snap.sp.wrapping_add(delta);
+    if snap.x[29] >= src && snap.x[29] < src + COPY + 0x1000 {
+        snap.x[29] = snap.x[29].wrapping_add(delta);
+    }
+    let dummy = VMPointer::new(block.pointer.addr, 0, backend.clone());
+    let mut child = MarshmallowThread::new(
+        emulator.clone(),
+        child_id as u32,
+        VMPointer::new(snap.pc, 0, backend.clone()),
+        dummy,
+        None,
+        snap.tpidr,
+        snap.sp.wrapping_sub(16),
+    );
+    child.thread_task_mut().until = 0x7ffff0000;
+    child.thread_task_mut().set_stack_block(block);
+    child.thread_task_mut().plant_snap(snap);
+    emulator.inner_mut().fork_state.insert(
+        child_id,
+        ForkState {
+            alive: Rc::new(Cell::new(true)),
+            status: Rc::new(Cell::new(0)),
+        },
+    );
+    emulator
+        .inner_mut()
+        .thread_dispatcher
+        .add_thread(AbstractTask::MarshmallowThread(child));
+    info!("fork child tid={} (cooperative)", child_id);
+    ret_i32!(backend, child_id);
 }
 
 pub fn syscall_faccessat<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
@@ -1509,6 +1649,61 @@ pub fn syscall_connect<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulato
     }
 
     unreachable!()
+}
+
+pub fn syscall_ppoll<'a, T: Clone>(backend: &Backend<'a, T>, emulator: &AndroidEmulator<'a, T>) {
+    let fds = ldr_u64!(backend, X0);
+    let nfds = ldr_u64!(backend, X1).min(64);
+    const POLLIN: i16 = 0x1;
+    let mut watches = Vec::new();
+    let mut ready = 0i64;
+    for i in 0..nfds {
+        let base = fds + i * 8;
+        let fd = backend.mem_read_i32(base).unwrap_or(-1);
+        let mut ev = [0u8; 2];
+        let events = if backend.mem_read(base + 4, &mut ev).is_ok() {
+            i16::from_le_bytes(ev)
+        } else {
+            0
+        };
+        let revents_off = base + 6;
+        let pipe = if fd >= 0 {
+            match emulator.inner_mut().file_system.get_file_mut(fd) {
+                Some(FileIO::Dynamic(f)) => f.pipe_reader_bufs(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let has = pipe
+            .as_ref()
+            .map(|(b, p)| b.borrow().len() > *p.borrow())
+            .unwrap_or(false);
+        let revents = if events & POLLIN != 0 && has {
+            ready += 1;
+            POLLIN
+        } else {
+            0
+        };
+        let _ = backend.mem_write(revents_off, &revents.to_le_bytes());
+        watches.push(crate::linux::thread::PollWatch::new(events, revents_off, pipe));
+    }
+    if ready > 0 {
+        info!("syscall ppoll nfds={} => {}", nfds, ready);
+        ret_i32!(backend, ready as i32);
+        return;
+    }
+    if emulator.inner_mut().context_task.is_some()
+        && emulator.inner_mut().thread_dispatcher.task_counts() > 1
+    {
+        info!("syscall ppoll nfds={} park", nfds);
+        park_running_task(
+            emulator,
+            Waiter::Poll(PollWaiter::new(watches, backend.clone())),
+        );
+        return;
+    }
+    ret_i32!(backend, 0);
 }
 
 pub fn syscall_pipe2<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {

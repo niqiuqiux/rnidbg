@@ -1,3 +1,5 @@
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::backend::{Backend, RegisterARM64};
 use crate::emulator::AndroidEmulator;
@@ -157,4 +159,158 @@ impl<'a, T: Clone> WaiterTrait<'a, T> for FutexNanoSleepWaiter<'a, T> {
 
     fn on_signal(&self, task: &SignalTask<'a, T>) {
     }
+}
+
+fn pipe_unread(buf: &Rc<RefCell<Vec<u8>>>, pos: &Rc<RefCell<usize>>) -> usize {
+    let len = buf.borrow().len();
+    let p = *pos.borrow();
+    len.saturating_sub(p)
+}
+
+pub struct PipeReadWaiter<'a, T: Clone> {
+    buf: Rc<RefCell<Vec<u8>>>,
+    read_pos: Rc<RefCell<usize>>,
+    dst: u64,
+    count: usize,
+    backend: Backend<'a, T>,
+    yielded: Cell<bool>,
+}
+
+impl<'a, T: Clone> PipeReadWaiter<'a, T> {
+    pub fn new(
+        buf: Rc<RefCell<Vec<u8>>>,
+        read_pos: Rc<RefCell<usize>>,
+        dst: u64,
+        count: usize,
+        backend: Backend<'a, T>,
+    ) -> Self {
+        Self { buf, read_pos, dst, count, backend, yielded: Cell::new(false) }
+    }
+}
+
+impl<'a, T: Clone> WaiterTrait<'a, T> for PipeReadWaiter<'a, T> {
+    fn can_dispatch(&self) -> bool {
+        if pipe_unread(&self.buf, &self.read_pos) > 0 {
+            return true;
+        }
+        if self.yielded.get() {
+            return true;
+        }
+        self.yielded.set(true);
+        false
+    }
+
+    fn on_continue_run(&self, _emulator: &AndroidEmulator<'a, T>) {
+        let data = self.buf.borrow();
+        let mut pos = self.read_pos.borrow_mut();
+        if *pos >= data.len() {
+            let _ = self.backend.reg_write(RegisterARM64::X0, 0);
+            return;
+        }
+        let n = self.count.min(data.len() - *pos);
+        let _ = self.backend.mem_write(self.dst, &data[*pos..*pos + n]);
+        *pos += n;
+        let _ = self.backend.reg_write(RegisterARM64::X0, n as u64);
+    }
+
+    fn on_signal(&self, _task: &SignalTask<'a, T>) {}
+}
+
+pub struct PollWatch {
+    events: i16,
+    revents_off: u64,
+    buf: Option<(Rc<RefCell<Vec<u8>>>, Rc<RefCell<usize>>)>,
+}
+
+pub struct PollWaiter<'a, T: Clone> {
+    watches: Vec<PollWatch>,
+    backend: Backend<'a, T>,
+    yielded: Cell<bool>,
+}
+
+impl PollWatch {
+    pub fn new(
+        events: i16,
+        revents_off: u64,
+        buf: Option<(Rc<RefCell<Vec<u8>>>, Rc<RefCell<usize>>)>,
+    ) -> Self {
+        Self { events, revents_off, buf }
+    }
+}
+
+impl<'a, T: Clone> PollWaiter<'a, T> {
+    pub fn new(watches: Vec<PollWatch>, backend: Backend<'a, T>) -> Self {
+        Self { watches, backend, yielded: Cell::new(false) }
+    }
+}
+
+impl<'a, T: Clone> WaiterTrait<'a, T> for PollWaiter<'a, T> {
+    fn can_dispatch(&self) -> bool {
+        const POLLIN: i16 = 0x1;
+        let ready = self.watches.iter().any(|w| {
+            if w.events & POLLIN == 0 {
+                return false;
+            }
+            w.buf.as_ref().map(|(b, p)| pipe_unread(b, p) > 0).unwrap_or(false)
+        });
+        if ready {
+            return true;
+        }
+        if self.yielded.get() {
+            return true;
+        }
+        self.yielded.set(true);
+        false
+    }
+
+    fn on_continue_run(&self, _emulator: &AndroidEmulator<'a, T>) {
+        const POLLIN: i16 = 0x1;
+        let mut ready = 0i64;
+        for w in &self.watches {
+            let mut revents: i16 = 0;
+            if w.events & POLLIN != 0 {
+                if w.buf.as_ref().map(|(b, p)| pipe_unread(b, p) > 0).unwrap_or(false) {
+                    revents = POLLIN;
+                    ready += 1;
+                }
+            }
+            let _ = self.backend.mem_write(w.revents_off, &revents.to_le_bytes());
+        }
+        let _ = self.backend.reg_write_i64(RegisterARM64::X0, ready);
+    }
+
+    fn on_signal(&self, _task: &SignalTask<'a, T>) {}
+}
+
+pub struct ChildExitWaiter {
+    alive: Rc<Cell<bool>>,
+    status: Rc<Cell<i32>>,
+    pid: i32,
+    wstatus: u64,
+}
+
+impl ChildExitWaiter {
+    pub fn new(pid: i32, wstatus: u64, alive: Rc<Cell<bool>>, status: Rc<Cell<i32>>) -> Self {
+        Self { alive, status, pid, wstatus }
+    }
+
+    pub fn alive(&self) -> bool {
+        self.alive.get()
+    }
+}
+
+impl<'a, T: Clone> WaiterTrait<'a, T> for ChildExitWaiter {
+    fn can_dispatch(&self) -> bool {
+        !self.alive.get()
+    }
+
+    fn on_continue_run(&self, emulator: &AndroidEmulator<'a, T>) {
+        let st = (self.status.get() & 0xff) << 8;
+        if self.wstatus != 0 {
+            let _ = emulator.backend.mem_write(self.wstatus, &st.to_le_bytes());
+        }
+        let _ = emulator.backend.reg_write_i32(RegisterARM64::X0, self.pid);
+    }
+
+    fn on_signal(&self, _task: &SignalTask<'a, T>) {}
 }

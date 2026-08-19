@@ -139,9 +139,7 @@ impl<'a, T: Clone> Task<'a, T> for CoveredTask<'a, T> {
                 Waiter::FutexNanoSleep(futex_task) => {
                     futex_task.on_signal(&task);
                 }
-                Waiter::Unknown(_) => {
-                    panic!("unknown waiter: add_signal_task");
-                }
+                Waiter::PipeRead(_) | Waiter::Poll(_) | Waiter::ChildExit(_) | Waiter::Unknown(_) => {}
             }
         }
         self.signal_task_list.push(Rc::new(UnsafeCell::new(AbstractTask::SignalTask(task))));

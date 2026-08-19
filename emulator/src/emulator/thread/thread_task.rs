@@ -15,6 +15,15 @@ impl<'a, T: Clone> BaseThreadTask<'a, T> {
     pub fn allocate_stack(&mut self, p0: &AndroidEmulator<'a, T>) -> VMPointer<'a, T> {
         self.covered_task.base_task.allocate_stack(p0)
     }
+
+    pub fn plant_snap(&mut self, snap: crate::emulator::thread::Arm64Snap) {
+        self.covered_task.base_task.snap = Some(snap);
+        self.covered_task.base_task.skip_svc_epilogue = false;
+    }
+
+    pub fn set_stack_block(&mut self, block: crate::emulator::memory::MemoryBlock<'a, T>) {
+        self.covered_task.base_task.stack_block = Some(block);
+    }
 }
 
 impl<T: Clone> BaseThreadTask<'_, T> {

@@ -1,6 +1,8 @@
 #![allow(clippy::wrong_self_convention)]
 
+use std::cell::RefCell;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::anyhow;
 use bitflags::bitflags;
@@ -173,6 +175,11 @@ pub trait FileIOTrait<T: Clone> {
     fn lseek(&mut self, offset: i64, whence: i32) -> SeekResult;
 
     fn path(&self) -> &str;
+
+    /// Shared buffer of a pipe reader, used to park tasks until data arrives.
+    fn pipe_reader_bufs(&self) -> Option<(Rc<RefCell<Vec<u8>>>, Rc<RefCell<usize>>)> {
+        None
+    }
 
     fn connect(&mut self, _addr: VMPointer<T>, _addr_len: usize, _emulator: &AndroidEmulator<T>) -> i32 {
         panic!("connect not implemented");

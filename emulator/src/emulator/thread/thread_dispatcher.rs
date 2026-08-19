@@ -99,6 +99,8 @@ impl<'a, T: Clone> UniThreadDispatcher<'a, T> {
         match waiter {
             Some(Waiter::FutexIndefinite(w)) => w.wake_up(uaddr),
             Some(Waiter::FutexNanoSleep(w)) => w.wake_up(uaddr),
+            Some(Waiter::PipeRead(_)) | Some(Waiter::Poll(_)) | Some(Waiter::ChildExit(_))
+            | Some(Waiter::Unknown(_)) => false,
             _ => false,
         }
     }
@@ -115,6 +117,8 @@ impl<'a, T: Clone> UniThreadDispatcher<'a, T> {
             let released = match waiter {
                 Some(Waiter::FutexIndefinite(w)) => w.release_for_deadlock(),
                 Some(Waiter::FutexNanoSleep(w)) => w.release_for_deadlock(),
+                Some(Waiter::PipeRead(_)) | Some(Waiter::Poll(_)) | Some(Waiter::ChildExit(_))
+                | Some(Waiter::Unknown(_)) => false,
                 _ => false,
             };
             if released {

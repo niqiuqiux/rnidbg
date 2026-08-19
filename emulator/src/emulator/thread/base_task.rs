@@ -60,7 +60,7 @@ fn gpr(i: usize) -> RegisterARM64 {
     }
 }
 
-fn capture_snap<T: Clone>(emulator: &AndroidEmulator<T>) -> Arm64Snap {
+pub(crate) fn capture_snap<T: Clone>(emulator: &AndroidEmulator<T>) -> Arm64Snap {
     let b = &emulator.backend;
     let mut x = [0u64; 31];
     for i in 0..31 {
@@ -95,6 +95,10 @@ pub struct BaseTask<'a, T: Clone> {
     pub stack: Vec<FunctionCall>,
     pub bag: HashBag<u64>,
     pub status: TaskStatus,
+    /// When true, `continue_run` jumps to LR if `pc-4` is an SVC. Set after a
+    /// Halt from a kernel/hook SVC so we skip libc's post-SVC `cmn`. Planted
+    /// fork-child snaps leave this false so they execute the fork wrapper ret.
+    pub skip_svc_epilogue: bool,
 }
 
 impl <'a, T: Clone> BaseTask<'a, T> {
@@ -108,6 +112,7 @@ impl <'a, T: Clone> BaseTask<'a, T> {
             stack: Vec::new(),
             bag: HashBag::new(),
             status: TaskStatus::Z,
+            skip_svc_epilogue: false,
         }
     }
 
@@ -139,7 +144,8 @@ impl <'a, T: Clone> BaseTask<'a, T> {
         let x8 = backend.reg_read(RegisterARM64::X8).unwrap_or(0);
         // After Halt in a leaf `svc #0`, resume at LR. Returning into the
         // post-SVC CMN/RET of the libc wrapper has been seen to AV the host.
-        if lr != 0 && pc >= 4 {
+        // Fresh fork-child snaps must not skip: they still need the wrapper `ret`.
+        if self.skip_svc_epilogue && lr != 0 && pc >= 4 {
             let mut insn = [0u8; 4];
             if backend.mem_read(pc - 4, &mut insn).is_ok() {
                 let w = u32::from_le_bytes(insn);
@@ -149,6 +155,7 @@ impl <'a, T: Clone> BaseTask<'a, T> {
                 }
             }
         }
+        self.skip_svc_epilogue = false;
         log::debug!(
             "continue_run pc=0x{:x} lr=0x{:x} x0=0x{:x} x8=0x{:x} until=0x{:x}",
             pc, lr, x0, x8, until
@@ -163,6 +170,15 @@ impl <'a, T: Clone> BaseTask<'a, T> {
                 }
                 Waiter::FutexNanoSleep(futex_task) => {
                     futex_task.on_continue_run(emulator);
+                }
+                Waiter::PipeRead(w) => {
+                    w.on_continue_run(emulator);
+                }
+                Waiter::Poll(w) => {
+                    w.on_continue_run(emulator);
+                }
+                Waiter::ChildExit(w) => {
+                    w.on_continue_run(emulator);
                 }
                 Waiter::Unknown(_) => {
                     warn!("unknown waiter on continue_run, ignoring");
@@ -197,6 +213,9 @@ impl<'a, T: Clone> RunnableTask<'a, T> for BaseTask<'a, T> {
                 Waiter::FutexNanoSleep(futex_task) => {
                     <FutexNanoSleepWaiter<'_, T> as WaiterTrait<'_, T>>::can_dispatch(futex_task)
                 }
+                Waiter::PipeRead(w) => w.can_dispatch(),
+                Waiter::Poll(w) => w.can_dispatch(),
+                Waiter::ChildExit(w) => !w.alive(),
                 Waiter::Unknown(_) => {
                     warn!("unknown waiter on can_dispatch, treating as runnable");
                     true
@@ -208,6 +227,7 @@ impl<'a, T: Clone> RunnableTask<'a, T> for BaseTask<'a, T> {
 
     fn save_context(&mut self, emulator: &AndroidEmulator<'a, T>) {
         self.snap = Some(capture_snap(emulator));
+        self.skip_svc_epilogue = true;
         let backend = emulator.backend.clone();
         let mut context = if let Some(context) = &self.context {
             context.clone()

@@ -340,7 +340,7 @@ fn syscall<'a, T: Clone>(nr: Syscalls, backend: &Backend<'a, T>, emulator: &Andr
             syscalls::syscall_sched_setaffinity(backend, emulator);
         }
         Syscalls::__NR_ppoll => {
-            let _ = backend.reg_write(RegisterARM64::X0, 0);
+            syscalls::syscall_ppoll(backend, emulator);
         }
         Syscalls::__NR_clone3 => {
             syscalls::syscall_enosys(backend, emulator, nr);
