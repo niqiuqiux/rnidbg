@@ -121,6 +121,27 @@ fn is_proc_task_dir(path: &str, self_pid: u32) -> bool {
     num.parse::<u32>().ok().filter(|p| *p == self_pid || *p != 0).is_some()
 }
 
+fn parse_proc_comm_tid(path: &str, self_pid: u32) -> Option<u32> {
+    if path == "/proc/self/comm" {
+        return Some(self_pid);
+    }
+    let rest = path.strip_prefix("/proc/")?;
+    let num = rest.strip_suffix("/comm")?;
+    if num == "self" {
+        return Some(self_pid);
+    }
+    if let Ok(tid) = num.parse::<u32>() {
+        return Some(tid);
+    }
+    if let Some(tid_s) = num.strip_prefix("self/task/") {
+        return tid_s.parse().ok();
+    }
+    if let Some((_, tid_s)) = num.split_once("/task/") {
+        return tid_s.parse().ok();
+    }
+    None
+}
+
 fn parse_proc_status_tid(path: &str, self_pid: u32) -> Option<u32> {
     if path == "/proc/self/status" {
         return Some(self_pid);
@@ -444,7 +465,37 @@ pub fn syscall_prctl<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<
     info!("syscall prctl(op={}, arg2=0x{:x}, arg3=0x{:x}, arg4=0x{:x}) from {}", op, arg2, arg3, arg4, from);
 
     match op {
-        PR_SET_VMA | PR_SET_NAME | PR_GET_NAME | PR_SET_DUMPABLE
+        PR_SET_NAME => {
+            let tid = emulator.get_current_pid();
+            let mut buf = [0u8; 16];
+            if arg2 != 0 {
+                let _ = backend.mem_read(arg2, &mut buf);
+            }
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            let name = String::from_utf8_lossy(&buf[..end]).into_owned();
+            info!("prctl PR_SET_NAME tid={} name={:?}", tid, name);
+            emulator.inner_mut().thread_comm.insert(tid, name);
+            ret_i32!(backend, 0);
+        }
+        PR_GET_NAME => {
+            let tid = emulator.get_current_pid();
+            let name = {
+                let inner = emulator.inner_mut();
+                inner
+                    .thread_comm
+                    .get(&tid)
+                    .cloned()
+                    .unwrap_or_else(|| inner.proc_name.clone())
+            };
+            let mut out = [0u8; 16];
+            let n = name.as_bytes().len().min(15);
+            out[..n].copy_from_slice(&name.as_bytes()[..n]);
+            if arg2 != 0 {
+                let _ = backend.mem_write(arg2, &out);
+            }
+            ret_i32!(backend, 0);
+        }
+        PR_SET_VMA | PR_SET_DUMPABLE
         | PR_SET_PTRACER | PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS
         | PR_PAC_RESET_KEYS | PR_SET_TAGGED_ADDR_CTRL | PR_SET_THP_DISABLE | PR_SET_MDWE => {
             ret_i32!(backend, 0);
@@ -1804,6 +1855,7 @@ pub fn syscall_faccessat<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmula
         || path == "/proc/stat" || path == "/proc/self/exe" || path == "/proc/self/status"
         || path == "/proc/self/task" || path.ends_with("/task")
         || parse_proc_status_tid(&path, emulator.inner_mut().pid).filter(|t| *t != 0).is_some()
+        || parse_proc_comm_tid(&path, emulator.inner_mut().pid).filter(|t| *t != 0).is_some()
     {
         ret_i32!(backend, 0);
         return;
@@ -2595,6 +2647,30 @@ fn open<T: Clone>(emulator: &AndroidEmulator<T>, path: &str, flags: OFlag, mode:
         let body = format!(
             "Name:\t{proc_name}\nState:\tS (sleeping)\nTgid:\t{pid}\nPid:\t{tid}\nPPid:\t{ppid}\nTracerPid:\t{tracer}\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n"
         );
+        let fd = emulator.inner_mut().file_system.insert_file(FileIO::Bytes(ByteArrayFileIO::new(
+            body.into_bytes(),
+            path.to_string(),
+            0,
+            flags.bits(),
+            StMode::SYSTEM_FILE,
+        )));
+        return (fd, 0);
+    }
+    if let Some(tid) = parse_proc_comm_tid(path, pid) {
+        if tid == 0 {
+            let errno: i32 = Errno::ENOENT.into();
+            return (-errno, errno);
+        }
+        let name = {
+            let inner = emulator.inner_mut();
+            inner
+                .thread_comm
+                .get(&tid)
+                .cloned()
+                .unwrap_or_else(|| inner.proc_name.clone())
+        };
+        info!("open {} => comm tid={} name={:?}", path, tid, name);
+        let body = format!("{name}\n");
         let fd = emulator.inner_mut().file_system.insert_file(FileIO::Bytes(ByteArrayFileIO::new(
             body.into_bytes(),
             path.to_string(),

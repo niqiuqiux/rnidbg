@@ -88,6 +88,8 @@ pub(crate) struct AndroidEmulatorInner<'a, T: Clone> {
     pub ptrace_stop: HashMap<i32, PtraceStop>,
     /// Last `sigaction` blobs keyed by signum (32-byte guest `sigaction`).
     pub sigaction: HashMap<i32, [u8; 32]>,
+    /// `prctl(PR_SET_NAME)` per-tid comm, served by `/proc/.../comm`.
+    pub thread_comm: HashMap<u32, String>,
 }
 
 #[derive(Clone)]
@@ -150,6 +152,7 @@ impl <'a, T: Clone> AndroidEmulator<'a, T> {
                 fork_state: HashMap::new(),
                 ptrace_stop: HashMap::new(),
                 sigaction: HashMap::new(),
+                thread_comm: HashMap::new(),
             })),
             backend
         })
