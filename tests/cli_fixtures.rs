@@ -146,9 +146,13 @@ fn jni_hwdetect_loads_and_calls_export() {
         "hwdetect workers did not increment heartbeat\n{logs}"
     );
     // Cooperative fork + ptrace GET/SETREGSET: self-check reaches stage 7
-    // with 6 BP / 4 WP slots. SIGTRAP injection is still missing.
+    // with 6 BP / 4 WP slots. CONT injects SIGTRAP in worker execution order.
     assert!(
         logs.contains("stage=7") && logs.contains("BP=6"),
         "hwdetect ptrace self-check did not finish stage 7 / 6 BP slots\n{logs}"
+    );
+    assert!(
+        logs.contains("\"score\":255") && logs.contains("\"maxScore\":280"),
+        "hwdetect score did not reach 255/280 after SIGTRAP execution-order hits\n{logs}"
     );
 }

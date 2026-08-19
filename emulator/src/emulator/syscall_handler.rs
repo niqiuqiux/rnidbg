@@ -372,6 +372,12 @@ fn syscall<'a, T: Clone>(nr: Syscalls, backend: &Backend<'a, T>, emulator: &Andr
         Syscalls::__NR_ptrace => {
             syscalls::syscall_ptrace(backend, emulator);
         }
+        Syscalls::__NR_process_vm_readv => {
+            syscalls::syscall_process_vm_readv(backend, emulator);
+        }
+        Syscalls::__NR_process_vm_writev => {
+            syscalls::syscall_process_vm_writev(backend, emulator);
+        }
         _ => {
             syscalls::syscall_enosys(backend, emulator, nr);
         }

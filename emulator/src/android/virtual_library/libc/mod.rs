@@ -58,7 +58,9 @@ impl<'a, T: Clone> HookListener<'a, T> for Libc<'a, T> {
             "usleep" => svc.register_svc(Box::new(sleep::Usleep)),
             "nanosleep" => svc.register_svc(Box::new(sleep::Nanosleep)),
             "clock_nanosleep" => svc.register_svc(Box::new(sleep::ClockNanosleep)),
-            "sigaction" | "__sigaction" => svc.register_svc(Box::new(sleep::Sigaction)),
+            "sigaction" | "__sigaction" | "sigaction64" | "__sigaction64" => {
+                svc.register_svc(Box::new(sleep::Sigaction))
+            }
             _ => 0
         };
 

@@ -24,6 +24,10 @@ impl<'a, T: Clone> BaseThreadTask<'a, T> {
     pub fn set_stack_block(&mut self, block: crate::emulator::memory::MemoryBlock<'a, T>) {
         self.covered_task.base_task.stack_block = Some(block);
     }
+
+    pub fn last_snap(&self) -> Option<crate::emulator::thread::Arm64Snap> {
+        self.covered_task.base_task.snap.clone()
+    }
 }
 
 impl<T: Clone> BaseThreadTask<'_, T> {

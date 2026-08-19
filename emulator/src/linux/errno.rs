@@ -5,6 +5,7 @@ pub enum Errno {
     OK = 0,
     EPERM = 1,
     ENOENT = 2,
+    ESRCH = 3,
     ENXIO = 6,
     EBADF = 9,
     ECHILD = 10,

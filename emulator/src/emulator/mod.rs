@@ -84,12 +84,23 @@ pub(crate) struct AndroidEmulatorInner<'a, T: Clone> {
     pub ptrace_regset: HashMap<(i32, u32), Vec<u8>>,
     /// Cooperative `fork` children: tid -> still-running / exit status.
     pub fork_state: HashMap<i32, ForkState>,
+    /// Pending `waitpid` stop for a ptraced tid.
+    pub ptrace_stop: HashMap<i32, PtraceStop>,
+    /// Last `sigaction` blobs keyed by signum (32-byte guest `sigaction`).
+    pub sigaction: HashMap<i32, [u8; 32]>,
 }
 
 #[derive(Clone)]
 pub struct ForkState {
     pub alive: Rc<Cell<bool>>,
     pub status: Rc<Cell<i32>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PtraceStop {
+    pub signo: i32,
+    pub addr: u64,
+    pub reported: bool,
 }
 
 #[repr(C)]
@@ -137,6 +148,8 @@ impl <'a, T: Clone> AndroidEmulator<'a, T> {
                 ptrace_tracer: HashMap::new(),
                 ptrace_regset: HashMap::new(),
                 fork_state: HashMap::new(),
+                ptrace_stop: HashMap::new(),
+                sigaction: HashMap::new(),
             })),
             backend
         })

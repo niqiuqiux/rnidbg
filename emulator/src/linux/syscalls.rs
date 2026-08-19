@@ -1,5 +1,6 @@
 use std::ascii::AsciiExt;
 use std::cell::{Cell, OnceCell};
+use std::collections::VecDeque;
 use std::ffi::c_long;
 use std::rc::Rc;
 use std::fmt::{format, Write as IGNORE};
@@ -17,12 +18,12 @@ use crate::backend::RegisterARM64;
 use crate::backend::RegisterARM64::{*};
 use crate::emulator::{AndroidEmulator, AndroidEmulatorInner, ForkState, HEAP_BASE};
 use crate::emulator::signal::{SignalOps, UnixSigSet};
-use crate::emulator::thread::{AbstractTask, MarshmallowThread, RunnableTask, Task, TaskStatus, ThreadDispatcher, Waiter, WaiterTrait};
+use crate::emulator::thread::{AbstractTask, Function64, MarshmallowThread, RunnableTask, Task, TaskStatus, ThreadDispatcher, Waiter, WaiterTrait};
 use crate::linux::errno::Errno;
 use crate::linux::file_system::{FileIO, FileIOTrait, SeekResult, StMode};
 use crate::linux::fs::ByteArrayFileIO;
 use crate::linux::fs::cpuinfo::Cpuinfo;
-use crate::linux::fs::direction::Direction;
+use crate::linux::fs::direction::{Direction, DirectionEntry};
 use crate::linux::fs::linux_file::LinuxFileIO;
 use crate::linux::fs::maps::Maps;
 use crate::linux::fs::meminfo::Meminfo;
@@ -103,6 +104,23 @@ macro_rules! ldr_string {
     };
 }
 
+fn is_proc_task_dir(path: &str, self_pid: u32) -> bool {
+    if path == "/proc/self/task" {
+        return true;
+    }
+    let rest = match path.strip_prefix("/proc/") {
+        Some(r) => r,
+        None => return false,
+    };
+    let Some(num) = rest.strip_suffix("/task") else {
+        return false;
+    };
+    if num == "self" {
+        return true;
+    }
+    num.parse::<u32>().ok().filter(|p| *p == self_pid || *p != 0).is_some()
+}
+
 fn parse_proc_status_tid(path: &str, self_pid: u32) -> Option<u32> {
     if path == "/proc/self/status" {
         return Some(self_pid);
@@ -139,6 +157,238 @@ fn default_ptrace_regset(note: u32) -> Vec<u8> {
         }
         NT_PRSTATUS => vec![0u8; 272],
         _ => vec![0u8; 256],
+    }
+}
+
+const SIGSTOP: i32 = 19;
+const SIGTRAP: i32 = 5;
+const TRAP_HWBKPT: i32 = 4;
+const NT_PRSTATUS: u32 = 1;
+const NT_ARM_HW_BREAK: u32 = 0x402;
+const NT_ARM_HW_WATCH: u32 = 0x403;
+
+fn enabled_hwdebug(buf: &[u8]) -> Vec<u64> {
+    let mut out = Vec::new();
+    if buf.len() < 8 {
+        return out;
+    }
+    let nslots = (buf[0] as usize).min(16);
+    for i in 0..nslots {
+        let off = 8 + i * 16;
+        if off + 12 > buf.len() {
+            break;
+        }
+        let addr = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap_or([0; 8]));
+        let ctrl = u32::from_le_bytes(buf[off + 8..off + 12].try_into().unwrap_or([0; 4]));
+        if ctrl & 1 != 0 && addr != 0 {
+            out.push(addr);
+        }
+    }
+    out
+}
+
+fn collect_guest_tids<T: Clone>(emulator: &AndroidEmulator<T>) -> Vec<u32> {
+    let inner = emulator.inner_mut();
+    let mut tids = vec![inner.pid];
+    for cell in inner
+        .thread_dispatcher
+        .task_list()
+        .iter()
+        .chain(inner.thread_dispatcher.thread_task().iter())
+    {
+        match unsafe { &*cell.get() } {
+            AbstractTask::MarshmallowThread(t) => tids.push(t.get_id()),
+            AbstractTask::Function64(t) => tids.push(t.get_id()),
+            _ => {}
+        }
+    }
+    tids.sort_unstable();
+    tids.dedup();
+    tids
+}
+
+fn pid_is_live<T: Clone>(emulator: &AndroidEmulator<T>, pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let inner = emulator.inner_mut();
+    if pid as u32 == inner.pid {
+        return true;
+    }
+    if inner.ptrace_tracer.contains_key(&pid) || inner.fork_state.contains_key(&pid) {
+        return true;
+    }
+    for cell in inner
+        .thread_dispatcher
+        .task_list()
+        .iter()
+        .chain(inner.thread_dispatcher.thread_task().iter())
+    {
+        let tid = match unsafe { &*cell.get() } {
+            AbstractTask::MarshmallowThread(t) => t.get_id() as i32,
+            AbstractTask::Function64(t) => t.get_id() as i32,
+            _ => continue,
+        };
+        if tid == pid {
+            return true;
+        }
+    }
+    false
+}
+
+fn marshmallow_pthread<T: Clone>(emulator: &AndroidEmulator<T>, pid: i32) -> Option<u64> {
+    let inner = emulator.inner_mut();
+    for cell in inner
+        .thread_dispatcher
+        .task_list()
+        .iter()
+        .chain(inner.thread_dispatcher.thread_task().iter())
+    {
+        if let AbstractTask::MarshmallowThread(t) = unsafe { &*cell.get() } {
+            if t.get_id() as i32 == pid {
+                return Some(t.pthread_addr());
+            }
+        }
+    }
+    None
+}
+
+fn thread_prstatus<T: Clone>(emulator: &AndroidEmulator<T>, pid: i32) -> Vec<u8> {
+    let mut buf = vec![0u8; 272];
+    let inner = emulator.inner_mut();
+    for cell in inner
+        .thread_dispatcher
+        .task_list()
+        .iter()
+        .chain(inner.thread_dispatcher.thread_task().iter())
+    {
+        if let AbstractTask::MarshmallowThread(t) = unsafe { &*cell.get() } {
+            if t.get_id() as i32 == pid {
+                if let Some(snap) = t.thread_task_mut().last_snap() {
+                    for i in 0..31 {
+                        let off = i * 8;
+                        buf[off..off + 8].copy_from_slice(&snap.x[i].to_le_bytes());
+                    }
+                    buf[248..256].copy_from_slice(&snap.sp.to_le_bytes());
+                    buf[256..264].copy_from_slice(&snap.pc.to_le_bytes());
+                    buf[264..272].copy_from_slice(&snap.nzcv.to_le_bytes());
+                }
+                break;
+            }
+        }
+    }
+    buf
+}
+
+/// hwdetect workers switch on a command word at `start_arg+32`:
+/// 1 = cold path, 2 = hot then cold, 3 = stage-marker table, 4 = watch reads.
+/// `PTRACE_CONT` must fire the next *executed* enabled slot, not slot 0.
+fn worker_exec_seq<T: Clone>(emulator: &AndroidEmulator<T>, pid: i32) -> Option<Vec<u64>> {
+    let pthread = marshmallow_pthread(emulator, pid)?;
+    let backend = &emulator.backend;
+    let routine = backend.mem_read_u64(pthread + 0x60).unwrap_or(0);
+    let arg = backend.mem_read_u64(pthread + 0x68).unwrap_or(0);
+    if arg == 0 {
+        return None;
+    }
+    let cmd = backend.mem_read_i32(arg + 32).unwrap_or(0) as u32;
+    let base = {
+        let inner = emulator.inner_mut();
+        let hint = if routine != 0 { routine } else { arg };
+        let module = inner.memory.find_module_by_address(hint)?;
+        unsafe { &*module.get() }.base
+    };
+    match cmd {
+        1 => Some(vec![base + 0x7607c, base + 0x76084]),
+        2 => Some(vec![base + 0x7608c, base + 0x76084]),
+        3 => {
+            let mut seq = Vec::new();
+            for i in 0..16u64 {
+                let p = backend.mem_read_u64(base + 0xed190 + i * 8).unwrap_or(0);
+                if p != 0 {
+                    seq.push(p);
+                }
+            }
+            if seq.is_empty() {
+                None
+            } else {
+                Some(seq)
+            }
+        }
+        4 => Some((0..4u64).map(|i| base + 0xf9670 + i * 8).collect()),
+        _ => None,
+    }
+}
+
+fn ptrace_pick_hit<T: Clone>(emulator: &AndroidEmulator<T>, pid: i32) -> Option<u64> {
+    let (last, enabled) = {
+        let inner = emulator.inner_mut();
+        let last = inner
+            .ptrace_stop
+            .get(&pid)
+            .filter(|s| s.signo == SIGTRAP)
+            .map(|s| s.addr)
+            .unwrap_or(0);
+        let mut enabled = Vec::new();
+        for note in [NT_ARM_HW_BREAK, NT_ARM_HW_WATCH] {
+            if let Some(buf) = inner.ptrace_regset.get(&(pid, note)) {
+                enabled.extend(enabled_hwdebug(buf));
+            }
+        }
+        (last, enabled)
+    };
+    if enabled.is_empty() {
+        return None;
+    }
+    if let Some(seq) = worker_exec_seq(emulator, pid) {
+        let mut after_last = last == 0 || !seq.iter().any(|a| *a == last);
+        for addr in seq {
+            if !after_last {
+                if addr == last {
+                    after_last = true;
+                }
+                continue;
+            }
+            if enabled.contains(&addr) {
+                return Some(addr);
+            }
+        }
+        return None;
+    }
+    enabled
+        .iter()
+        .copied()
+        .find(|a| *a != last)
+        .or_else(|| enabled.first().copied())
+}
+
+fn ptrace_set_pc<T: Clone>(emulator: &AndroidEmulator<T>, pid: i32, pc: u64) {
+    let snap_regs = thread_prstatus(emulator, pid);
+    let inner = emulator.inner_mut();
+    let mut regs = inner
+        .ptrace_regset
+        .get(&(pid, NT_PRSTATUS))
+        .cloned()
+        .unwrap_or(snap_regs);
+    if regs.len() < 272 {
+        regs.resize(272, 0);
+    }
+    // user_pt_regs: regs[31] + sp + pc + pstate. pc at offset 256.
+    regs[256..264].copy_from_slice(&pc.to_le_bytes());
+    inner.ptrace_regset.insert((pid, NT_PRSTATUS), regs);
+}
+
+fn ptrace_queue_stop<T: Clone>(emulator: &AndroidEmulator<T>, pid: i32, signo: i32, addr: u64) {
+    emulator.inner_mut().ptrace_stop.insert(
+        pid,
+        crate::emulator::PtraceStop {
+            signo,
+            addr,
+            reported: false,
+        },
+    );
+    if signo == SIGTRAP && addr != 0 {
+        ptrace_set_pc(emulator, pid, addr);
     }
 }
 
@@ -1094,10 +1344,19 @@ pub fn syscall_rt_sigaction<T: Clone>(backend: &Backend<T>, emulator: &AndroidEm
     let oldact = ldr_u64!(backend, X2);
     info!("syscall rt_sigaction(sig={}, act=0x{:x}, oldact=0x{:x})", signum, act, oldact);
     if oldact != 0 {
-        // struct sigaction { sa_handler, sa_flags, sa_mask... } — report SIG_DFL
-        let _ = backend.mem_write(oldact, &[0u8; 32]);
+        let prev = emulator
+            .inner_mut()
+            .sigaction
+            .get(&signum)
+            .copied()
+            .unwrap_or([0u8; 32]);
+        let _ = backend.mem_write(oldact, &prev);
     }
-    let _ = emulator;
+    if act != 0 {
+        let mut buf = [0u8; 32];
+        let _ = backend.mem_read(act, &mut buf);
+        emulator.inner_mut().sigaction.insert(signum, buf);
+    }
     ret_i32!(backend, 0);
 }
 
@@ -1144,6 +1403,34 @@ pub fn syscall_wait4<'a, T: Clone>(backend: &Backend<'a, T>, emulator: &AndroidE
         }
     }
 
+    if pid > 0 {
+        if let Some(stop) = emulator.inner_mut().ptrace_stop.get_mut(&pid) {
+            if !stop.reported {
+                stop.reported = true;
+                let st = (stop.signo << 8) | 0x7f;
+                if wstatus != 0 {
+                    let _ = backend.mem_write(wstatus, &st.to_le_bytes());
+                }
+                info!(
+                    "syscall wait4(pid={}, options={}) => SIG{} at 0x{:x}",
+                    pid, options, stop.signo, stop.addr
+                );
+                ret_i32!(backend, pid);
+                return;
+            }
+            if options & WNOHANG != 0 {
+                ret_i32!(backend, 0);
+                return;
+            }
+        } else if emulator.inner_mut().ptrace_tracer.contains_key(&pid) {
+            // Ptraced but running (after CONT with no pending trap).
+            if options & WNOHANG != 0 {
+                ret_i32!(backend, 0);
+                return;
+            }
+        }
+    }
+
     let child = if pid <= 0 {
         emulator.inner_mut().pid.saturating_add(1000) as i32
     } else {
@@ -1176,6 +1463,7 @@ pub fn syscall_ptrace<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator
     const PTRACE_CONT: u32 = 7;
     const PTRACE_ATTACH: u32 = 16;
     const PTRACE_DETACH: u32 = 17;
+    const PTRACE_GETSIGINFO: u32 = 0x4202;
     const PTRACE_GETREGSET: u32 = 0x4204;
     const PTRACE_SETREGSET: u32 = 0x4205;
     const PTRACE_SEIZE: u32 = 0x4206;
@@ -1203,10 +1491,28 @@ pub fn syscall_ptrace<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator
         PTRACE_ATTACH | PTRACE_SEIZE => {
             let tracer = emulator.get_current_pid() as i32;
             emulator.inner_mut().ptrace_tracer.insert(pid, tracer);
+            ptrace_queue_stop(emulator, pid, SIGSTOP, 0);
             ret_i32!(backend, 0);
         }
         PTRACE_DETACH => {
             emulator.inner_mut().ptrace_tracer.remove(&pid);
+            emulator.inner_mut().ptrace_stop.remove(&pid);
+            emulator.inner_mut().ptrace_regset.retain(|(t, _), _| *t != pid);
+            ret_i32!(backend, 0);
+        }
+        PTRACE_GETSIGINFO => {
+            let stop = emulator.inner_mut().ptrace_stop.get(&pid).cloned();
+            if data != 0 {
+                let mut info = [0u8; 128];
+                if let Some(stop) = &stop {
+                    info[0..4].copy_from_slice(&stop.signo.to_le_bytes());
+                    if stop.signo == SIGTRAP {
+                        info[8..12].copy_from_slice(&TRAP_HWBKPT.to_le_bytes());
+                    }
+                    info[16..24].copy_from_slice(&stop.addr.to_le_bytes());
+                }
+                let _ = backend.mem_write(data, &info);
+            }
             ret_i32!(backend, 0);
         }
         PTRACE_GETREGSET => {
@@ -1218,8 +1524,14 @@ pub fn syscall_ptrace<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator
                     .inner_mut()
                     .ptrace_regset
                     .get(&(pid, note))
-                    .cloned()
-                    .unwrap_or_else(|| default_ptrace_regset(note));
+                    .cloned();
+                let stored = stored.unwrap_or_else(|| {
+                    if note == NT_PRSTATUS {
+                        thread_prstatus(emulator, pid)
+                    } else {
+                        default_ptrace_regset(note)
+                    }
+                });
                 if iov_base != 0 && iov_len > 0 {
                     let n = iov_len.min(stored.len());
                     let _ = backend.mem_write(iov_base, &stored[..n]);
@@ -1242,7 +1554,17 @@ pub fn syscall_ptrace<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator
             }
             ret_i32!(backend, 0);
         }
-        PTRACE_CONT | PTRACE_INTERRUPT => {
+        PTRACE_INTERRUPT => {
+            ptrace_queue_stop(emulator, pid, SIGSTOP, 0);
+            ret_i32!(backend, 0);
+        }
+        PTRACE_CONT => {
+            if let Some(addr) = ptrace_pick_hit(emulator, pid) {
+                info!("ptrace CONT pid={} => SIGTRAP at 0x{:x}", pid, addr);
+                ptrace_queue_stop(emulator, pid, SIGTRAP, addr);
+            } else {
+                emulator.inner_mut().ptrace_stop.remove(&pid);
+            }
             ret_i32!(backend, 0);
         }
         _ => {
@@ -1480,6 +1802,7 @@ pub fn syscall_faccessat<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmula
     if path == "/dev/null" || path == "/dev/urandom" || path == "/dev/zero"
         || path == "/proc/self/maps" || path == "/proc/meminfo" || path == "/proc/cpuinfo"
         || path == "/proc/stat" || path == "/proc/self/exe" || path == "/proc/self/status"
+        || path == "/proc/self/task" || path.ends_with("/task")
         || parse_proc_status_tid(&path, emulator.inner_mut().pid).filter(|t| *t != 0).is_some()
     {
         ret_i32!(backend, 0);
@@ -1829,6 +2152,113 @@ pub fn syscall_enosys<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator
     throw_err!(backend, emulator, Errno::ENOSYS);
 }
 
+fn read_guest_iovs<T: Clone>(backend: &Backend<T>, addr: u64, cnt: usize) -> Result<Vec<(u64, usize)>, Errno> {
+    if cnt > 1024 {
+        return Err(Errno::EINVAL);
+    }
+    let mut out = Vec::with_capacity(cnt);
+    for i in 0..cnt as u64 {
+        let base = backend.mem_read_u64(addr + i * 16).unwrap_or(0);
+        let len = (backend.mem_read_u64(addr + i * 16 + 8).unwrap_or(0) as usize).min(1 << 20);
+        if base != 0 && len > 0 {
+            out.push((base, len));
+        }
+    }
+    Ok(out)
+}
+
+fn gather_iovs<T: Clone>(backend: &Backend<T>, iovs: &[(u64, usize)]) -> Result<Vec<u8>, Errno> {
+    let mut buf = Vec::new();
+    for &(base, len) in iovs {
+        let chunk = backend.mem_read_as_vec(base, len).map_err(|_| Errno::EFAULT)?;
+        if chunk.len() != len {
+            return Err(Errno::EFAULT);
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+fn scatter_iovs<T: Clone>(backend: &Backend<T>, iovs: &[(u64, usize)], data: &[u8]) -> Result<usize, Errno> {
+    let mut off = 0usize;
+    for &(base, len) in iovs {
+        if off >= data.len() {
+            break;
+        }
+        let n = len.min(data.len() - off);
+        backend
+            .mem_write(base, &data[off..off + n])
+            .map_err(|_| Errno::EFAULT)?;
+        off += n;
+    }
+    Ok(off)
+}
+
+fn copy_process_vm<T: Clone>(
+    backend: &Backend<T>,
+    local: u64,
+    remote: u64,
+    liovcnt: usize,
+    riovcnt: usize,
+    to_remote: bool,
+) -> Result<usize, Errno> {
+    let lvec = read_guest_iovs(backend, local, liovcnt)?;
+    let rvec = read_guest_iovs(backend, remote, riovcnt)?;
+    if to_remote {
+        let data = gather_iovs(backend, &lvec)?;
+        scatter_iovs(backend, &rvec, &data)
+    } else {
+        let data = gather_iovs(backend, &rvec)?;
+        scatter_iovs(backend, &lvec, &data)
+    }
+}
+
+pub fn syscall_process_vm_readv<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
+    let pid = ldr_i32!(backend, X0);
+    let lvec = ldr_u64!(backend, X1);
+    let liovcnt = ldr_u64!(backend, X2) as usize;
+    let rvec = ldr_u64!(backend, X3);
+    let riovcnt = ldr_u64!(backend, X4) as usize;
+    info!(
+        "syscall process_vm_readv(pid={}, liovcnt={}, riovcnt={})",
+        pid, liovcnt, riovcnt
+    );
+    if !pid_is_live(emulator, pid) {
+        throw_err!(backend, emulator, Errno::ESRCH);
+    }
+    match copy_process_vm(backend, lvec, rvec, liovcnt, riovcnt, false) {
+        Ok(n) => {
+            ret_u64!(backend, n as u64);
+        }
+        Err(e) => {
+            throw_err!(backend, emulator, e);
+        }
+    }
+}
+
+pub fn syscall_process_vm_writev<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
+    let pid = ldr_i32!(backend, X0);
+    let lvec = ldr_u64!(backend, X1);
+    let liovcnt = ldr_u64!(backend, X2) as usize;
+    let rvec = ldr_u64!(backend, X3);
+    let riovcnt = ldr_u64!(backend, X4) as usize;
+    info!(
+        "syscall process_vm_writev(pid={}, liovcnt={}, riovcnt={})",
+        pid, liovcnt, riovcnt
+    );
+    if !pid_is_live(emulator, pid) {
+        throw_err!(backend, emulator, Errno::ESRCH);
+    }
+    match copy_process_vm(backend, lvec, rvec, liovcnt, riovcnt, true) {
+        Ok(n) => {
+            ret_u64!(backend, n as u64);
+        }
+        Err(e) => {
+            throw_err!(backend, emulator, e);
+        }
+    }
+}
+
 pub fn syscall_writev<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
     let fd = ldr_i32!(backend, X0);
     let iov = ldr_u64!(backend, X1);
@@ -2172,6 +2602,16 @@ fn open<T: Clone>(emulator: &AndroidEmulator<T>, path: &str, flags: OFlag, mode:
             flags.bits(),
             StMode::SYSTEM_FILE,
         )));
+        return (fd, 0);
+    }
+    if is_proc_task_dir(path, pid) {
+        let mut files = VecDeque::new();
+        for tid in collect_guest_tids(emulator) {
+            files.push_back(DirectionEntry::new(false, &tid.to_string()));
+        }
+        let fd = emulator.inner_mut().file_system.insert_file(FileIO::Direction(
+            Direction::new(files, path),
+        ));
         return (fd, 0);
     }
     let file_system = &mut emulator.inner_mut().file_system;

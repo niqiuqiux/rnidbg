@@ -62,11 +62,23 @@ impl<T: Clone> Arm64Svc<T> for Sigaction {
     fn name(&self) -> &str { "sigaction" }
 
     fn handle(&self, emu: &AndroidEmulator<T>) -> SvcCallResult {
-        let signum = emu.backend.reg_read(RegisterARM64::X0).unwrap_or(0);
+        let signum = emu.backend.reg_read(RegisterARM64::X0).unwrap_or(0) as i32;
+        let act = emu.backend.reg_read(RegisterARM64::X1).unwrap_or(0);
         let oldact = emu.backend.reg_read(RegisterARM64::X2).unwrap_or(0);
         info!("libc sigaction(sig={}) stub", signum);
         if oldact != 0 {
-            let _ = emu.backend.mem_write(oldact, &[0u8; 32]);
+            let prev = emu
+                .inner_mut()
+                .sigaction
+                .get(&signum)
+                .copied()
+                .unwrap_or([0u8; 32]);
+            let _ = emu.backend.mem_write(oldact, &prev);
+        }
+        if act != 0 {
+            let mut buf = [0u8; 32];
+            let _ = emu.backend.mem_read(act, &mut buf);
+            emu.inner_mut().sigaction.insert(signum, buf);
         }
         RET(0)
     }
