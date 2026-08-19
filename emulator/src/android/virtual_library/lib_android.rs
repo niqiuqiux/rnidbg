@@ -41,15 +41,19 @@ pub fn register<'a, T: Clone>(emu: &AndroidEmulator<'a, T>) -> RcUnsafeCell<Linu
         .load_virtual_module(SO_NAME.to_string(), symbols)
 }
 
-/// Register the virtual module only when the SDK tree has no real file.
+/// Prefer the virtual module. Device `libandroid.so` pulls binder/hwui/EGL
+/// plus vendor-only sonames that cannot boot as a DT_NEEDED of a JNI SO.
+/// Set `RNIDBG_REAL_LIBANDROID=1` to load the pulled file instead.
 pub fn ensure_registered<T: Clone>(emu: &AndroidEmulator<T>) {
     if emu.inner_mut().memory.modules.contains_key(SO_NAME) {
         return;
     }
-    let base = emu.inner_mut().base_path.clone();
-    let path = Path::new(&crate::android::sdk::lib64_dir(&base)).join(SO_NAME);
-    if path.exists() {
-        return;
+    if std::env::var("RNIDBG_REAL_LIBANDROID").ok().as_deref() == Some("1") {
+        let base = emu.inner_mut().base_path.clone();
+        let path = Path::new(&crate::android::sdk::lib64_dir(&base)).join(SO_NAME);
+        if path.exists() {
+            return;
+        }
     }
     let _ = register(emu);
 }

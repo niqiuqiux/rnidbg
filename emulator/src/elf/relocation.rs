@@ -12,6 +12,9 @@ pub struct ElfRelocation {
     pub(crate) offset: u64,
     pub(crate) info: i64,
     pub(crate) addend: i64,
+    /// `DT_RELA` / 24-byte entries carry `r_addend`. `DT_REL` stores the addend
+    /// in the relocated slot instead.
+    pub(crate) explicit_addend: bool,
 }
 
 impl ElfRelocation {
@@ -36,7 +39,8 @@ impl ElfRelocation {
             }
         };*/
 
-        let addend = if entry_size >= 24 {
+        let explicit_addend = entry_size >= 24;
+        let addend = if explicit_addend {
             parser.read_long()
         } else {
             0
@@ -49,6 +53,7 @@ impl ElfRelocation {
             offset,
             info,
             addend,
+            explicit_addend,
         }
     }
 

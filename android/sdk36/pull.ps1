@@ -27,7 +27,8 @@ $libs = @(
     "libbase.so",
     "libpackagelistparser.so",
     "libcgrouprc.so",
-    "libpcre2.so"
+    "libpcre2.so",
+    "libandroid.so"
 )
 
 foreach ($lib in $libs) {

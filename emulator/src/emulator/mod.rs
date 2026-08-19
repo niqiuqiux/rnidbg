@@ -78,6 +78,10 @@ pub(crate) struct AndroidEmulatorInner<'a, T: Clone> {
     pub exit_status: Option<i32>,
     /// Guest path reported by `/proc/self/exe`.
     pub exec_path: Option<String>,
+    /// `ptrace` attach: target tid -> tracer tid.
+    pub ptrace_tracer: HashMap<i32, i32>,
+    /// `PTRACE_GETREGSET`/`SETREGSET` blobs keyed by (tid, NT_*).
+    pub ptrace_regset: HashMap<(i32, u32), Vec<u8>>,
 }
 
 #[repr(C)]
@@ -122,6 +126,8 @@ impl <'a, T: Clone> AndroidEmulator<'a, T> {
                 base_path: crate::android::sdk::default_sdk_root(),
                 exit_status: None,
                 exec_path: None,
+                ptrace_tracer: HashMap::new(),
+                ptrace_regset: HashMap::new(),
             })),
             backend
         })

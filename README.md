@@ -20,9 +20,9 @@ Default CPU backend is **Dynarmic**. Unicorn 2.1.4 is optional.
 | `rnidbg jni --so tests/fixtures/arm64/libnative.so --onload` | `JNI_OnLoad` returns a valid JNI version |
 | `rnidbg exec --bin tests/fixtures/arm64/printf` | Libc-linked PIE: bionic crt runs `main`, libc `write(1)` prints `complete pie from rnidbg`, host exit 0 |
 | `rnidbg exec --bin tests/fixtures/arm64/test` | Signals, `statfs`, `dl_iterate_phdr`, pthread/cond handshake, properties. Host exits 0. On Windows a remaining-mutex deadlock after the child exits is unlocked then the host `TerminateProcess`es (resuming the JIT here used to AV). Guest stdout is often empty because `exit_group` does not flush libc stdio. |
-| `rnidbg jni --so tests/fixtures/arm64/libhwdetect.so --call Java_…_runHardwareBreakpointCheck` | Missing `libandroid.so` is a virtual stub. The JNI export is invoked. Report formatting still hits libc++ iostream / TLS and fail-softs to `null`. Host exit 0. |
+| `rnidbg jni --so tests/fixtures/arm64/libhwdetect.so --call Java_…_runHardwareBreakpointCheck` | Loads the NDK SO, calls the JNI export, and returns the JSON report (`maxScore:280`). `R_AARCH64_ABS64` now applies RELA `r_addend` (needed for libc++ VTT / `stdout`). Guest `printf`/`puts` are hooked to `write(1)` so FILE* vfprintf does not trip stack-protector. `libandroid.so` is a virtual module by default. pthread children are queued but not preempted on Windows (resuming the JIT after `clone` AVs), so the report still scores 0 / “受限”. Host exit 0. |
 
-`fork` is a stub (fake child pid). System `libc++.so` constructors are skipped when it is only a `DT_NEEDED` of `liblog`. Static libc++ iostream inside a SO is not a supported target yet.
+`fork` is a stub (fake child pid). System `libc++.so` constructors are skipped when it is only a `DT_NEEDED` of `liblog`. Pull extra device libs with `android/sdk36/pull.ps1`; set `RNIDBG_REAL_LIBANDROID=1` to load the pulled `libandroid.so` instead of the stub.
 
 ## Requirements
 

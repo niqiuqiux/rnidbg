@@ -471,7 +471,12 @@ impl<'a, T: Clone> AndroidElfLoader<'a, T> {
             let mut module_symbol: Option<ModuleSymbol> = None;
             match typ as u32 {
                 R_AARCH64_ABS64 => {
-                    let offset = relocation_addr.read_i64_with_offset(0)?;
+                    // RELA: use r_addend. REL: the addend lives in the slot.
+                    let offset = if relocation.explicit_addend {
+                        relocation.addend
+                    } else {
+                        relocation_addr.read_i64_with_offset(0)?
+                    };
                     module_symbol = self.resolve_symbol(load_base, &symbol, &relocation_addr, so_name.as_str(), &needed_libraries, offset as u64, emulator, elf_file)
                         .map_err(|e| warn!("resolve symbol failed: {:?}", e))
                         .ok();

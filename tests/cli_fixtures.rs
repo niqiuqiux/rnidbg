@@ -129,4 +129,8 @@ fn jni_hwdetect_loads_and_calls_export() {
         logs.contains("JNI Java_com_niqiuqiux_androidhwdetect_MainActivity_runHardwareBreakpointCheck"),
         "missing JNI call line\n{logs}"
     );
+    assert!(
+        logs.contains("\"maxScore\":280") && logs.contains("\"items\":["),
+        "JNI did not return the hardware-detect JSON report\n{logs}"
+    );
 }

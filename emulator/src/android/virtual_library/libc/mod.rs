@@ -50,6 +50,10 @@ impl<'a, T: Clone> HookListener<'a, T> for Libc<'a, T> {
             "strncmp" => svc.register_svc(Box::new(string::StrNCmp)),
             "strcasecmp" => svc.register_svc(Box::new(string::StrCaseCmp)),
             "strncasecmp" => svc.register_svc(Box::new(string::StrNCasCmp)),
+            "printf" => svc.register_svc(Box::new(string::Printf)),
+            "puts" => svc.register_svc(Box::new(string::Puts)),
+            "fprintf" => svc.register_svc(Box::new(string::Fprintf)),
+            "__printf_chk" => svc.register_svc(Box::new(string::PrintfChk)),
             _ => 0
         };
 

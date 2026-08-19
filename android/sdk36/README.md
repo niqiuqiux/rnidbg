@@ -9,6 +9,7 @@ system/lib64/libc.so
 system/lib64/libdl.so
 system/lib64/libm.so
 system/lib64/liblog.so
+system/lib64/libandroid.so   # optional; JNI SOs use a virtual stub unless RNIDBG_REAL_LIBANDROID=1
 ```
 
 NDK sysroot `libc.so` files are **stubs** (~240KB) and will not boot. Pull real

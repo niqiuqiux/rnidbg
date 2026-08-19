@@ -80,6 +80,45 @@ macro_rules! ldr_string {
     };
 }
 
+fn parse_proc_status_tid(path: &str, self_pid: u32) -> Option<u32> {
+    if path == "/proc/self/status" {
+        return Some(self_pid);
+    }
+    let rest = path.strip_prefix("/proc/")?;
+    let num = rest.strip_suffix("/status")?;
+    if let Ok(tid) = num.parse::<u32>() {
+        return Some(tid);
+    }
+    if let Some(tid_s) = num.strip_prefix("self/task/") {
+        return tid_s.parse().ok();
+    }
+    if let Some((_, tid_s)) = num.split_once("/task/") {
+        return tid_s.parse().ok();
+    }
+    None
+}
+
+fn default_ptrace_regset(note: u32) -> Vec<u8> {
+    const NT_PRSTATUS: u32 = 1;
+    const NT_ARM_HW_BREAK: u32 = 0x402;
+    const NT_ARM_HW_WATCH: u32 = 0x403;
+    match note {
+        NT_ARM_HW_BREAK => {
+            // user_hwdebug_state: dbg_info + pad + 16 slots. bits 7:0 = slot count.
+            let mut buf = vec![0u8; 8 + 16 * 16];
+            buf[0] = 6;
+            buf
+        }
+        NT_ARM_HW_WATCH => {
+            let mut buf = vec![0u8; 8 + 16 * 16];
+            buf[0] = 4;
+            buf
+        }
+        NT_PRSTATUS => vec![0u8; 272],
+        _ => vec![0u8; 256],
+    }
+}
+
 pub fn syscall_brk<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
     let addr = ldr_u64!(backend, X0);
     if option_env!("PRINT_SYSCALL_LOG") == Some("1") {
@@ -1052,30 +1091,84 @@ pub fn syscall_ptrace<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator
     const PTRACE_PEEKTEXT: u32 = 1;
     const PTRACE_PEEKDATA: u32 = 2;
     const PTRACE_PEEKUSER: u32 = 3;
+    const PTRACE_POKETEXT: u32 = 4;
+    const PTRACE_POKEDATA: u32 = 5;
+    const PTRACE_CONT: u32 = 7;
+    const PTRACE_ATTACH: u32 = 16;
+    const PTRACE_DETACH: u32 = 17;
     const PTRACE_GETREGSET: u32 = 0x4204;
+    const PTRACE_SETREGSET: u32 = 0x4205;
+    const PTRACE_SEIZE: u32 = 0x4206;
+    const PTRACE_INTERRUPT: u32 = 0x4207;
     match request {
-        PTRACE_PEEKTEXT | PTRACE_PEEKDATA | PTRACE_PEEKUSER => {
+        PTRACE_PEEKTEXT | PTRACE_PEEKDATA => {
+            let word = backend.mem_read_u64(addr).unwrap_or(0);
+            if data != 0 {
+                let _ = backend.mem_write(data, &word.to_le_bytes());
+            }
+            ret_i32!(backend, 0);
+        }
+        PTRACE_PEEKUSER => {
             if data != 0 {
                 let _ = backend.mem_write(data, &0u64.to_le_bytes());
             }
             ret_i32!(backend, 0);
         }
+        PTRACE_POKETEXT | PTRACE_POKEDATA => {
+            if addr != 0 {
+                let _ = backend.mem_write(addr, &data.to_le_bytes());
+            }
+            ret_i32!(backend, 0);
+        }
+        PTRACE_ATTACH | PTRACE_SEIZE => {
+            let tracer = emulator.get_current_pid() as i32;
+            emulator.inner_mut().ptrace_tracer.insert(pid, tracer);
+            ret_i32!(backend, 0);
+        }
+        PTRACE_DETACH => {
+            emulator.inner_mut().ptrace_tracer.remove(&pid);
+            ret_i32!(backend, 0);
+        }
         PTRACE_GETREGSET => {
+            let note = addr as u32;
             if data != 0 {
                 let iov_base = backend.mem_read_u64(data).unwrap_or(0);
-                let iov_len = backend.mem_read_u64(data + 8).unwrap_or(0).min(512);
+                let iov_len = backend.mem_read_u64(data + 8).unwrap_or(0).min(512) as usize;
+                let stored = emulator
+                    .inner_mut()
+                    .ptrace_regset
+                    .get(&(pid, note))
+                    .cloned()
+                    .unwrap_or_else(|| default_ptrace_regset(note));
                 if iov_base != 0 && iov_len > 0 {
-                    let zeros = vec![0u8; iov_len as usize];
-                    let _ = backend.mem_write(iov_base, &zeros);
+                    let n = iov_len.min(stored.len());
+                    let _ = backend.mem_write(iov_base, &stored[..n]);
+                    let _ = backend.mem_write(data + 8, &(n as u64).to_le_bytes());
                 }
             }
+            ret_i32!(backend, 0);
+        }
+        PTRACE_SETREGSET => {
+            let note = addr as u32;
+            if data != 0 {
+                let iov_base = backend.mem_read_u64(data).unwrap_or(0);
+                let iov_len = backend.mem_read_u64(data + 8).unwrap_or(0).min(512) as usize;
+                let mut buf = default_ptrace_regset(note);
+                if iov_base != 0 && iov_len > 0 {
+                    let n = iov_len.min(buf.len());
+                    let _ = backend.mem_read(iov_base, &mut buf[..n]);
+                }
+                emulator.inner_mut().ptrace_regset.insert((pid, note), buf);
+            }
+            ret_i32!(backend, 0);
+        }
+        PTRACE_CONT | PTRACE_INTERRUPT => {
             ret_i32!(backend, 0);
         }
         _ => {
             ret_i32!(backend, 0);
         }
     }
-    let _ = emulator;
 }
 
 pub fn syscall_kill<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmulator<T>) {
@@ -1247,6 +1340,7 @@ pub fn syscall_faccessat<T: Clone>(backend: &Backend<T>, emulator: &AndroidEmula
     if path == "/dev/null" || path == "/dev/urandom" || path == "/dev/zero"
         || path == "/proc/self/maps" || path == "/proc/meminfo" || path == "/proc/cpuinfo"
         || path == "/proc/stat" || path == "/proc/self/exe" || path == "/proc/self/status"
+        || parse_proc_status_tid(&path, emulator.inner_mut().pid).filter(|t| *t != 0).is_some()
     {
         ret_i32!(backend, 0);
         return;
@@ -1862,6 +1956,29 @@ fn open<T: Clone>(emulator: &AndroidEmulator<T>, path: &str, flags: OFlag, mode:
         let inner = emulator.inner_mut();
         (inner.pid, inner.ppid, inner.proc_name.clone())
     };
+    if let Some(tid) = parse_proc_status_tid(path, pid) {
+        if tid == 0 {
+            let errno: i32 = Errno::ENOENT.into();
+            return (-errno, errno);
+        }
+        let tracer = emulator
+            .inner_mut()
+            .ptrace_tracer
+            .get(&(tid as i32))
+            .copied()
+            .unwrap_or(0);
+        let body = format!(
+            "Name:\t{proc_name}\nState:\tS (sleeping)\nTgid:\t{pid}\nPid:\t{tid}\nPPid:\t{ppid}\nTracerPid:\t{tracer}\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n"
+        );
+        let fd = emulator.inner_mut().file_system.insert_file(FileIO::Bytes(ByteArrayFileIO::new(
+            body.into_bytes(),
+            path.to_string(),
+            0,
+            flags.bits(),
+            StMode::SYSTEM_FILE,
+        )));
+        return (fd, 0);
+    }
     let file_system = &mut emulator.inner_mut().file_system;
     if path == "/dev/urandom" {
         let fd = file_system.insert_file(FileIO::Dynamic(Box::new(
@@ -1930,20 +2047,6 @@ fn open<T: Clone>(emulator: &AndroidEmulator<T>, path: &str, flags: OFlag, mode:
     if path == "/proc/self/maps" {
         let fd = file_system.insert_file(FileIO::Dynamic(Box::new(
             Maps::new(path, flags.bits())
-        )));
-        return (fd, 0)
-    }
-
-    if path == "/proc/self/status" {
-        let body = format!(
-            "Name:\t{proc_name}\nState:\tS (sleeping)\nTgid:\t{pid}\nPid:\t{pid}\nPPid:\t{ppid}\nTracerPid:\t0\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n"
-        );
-        let fd = file_system.insert_file(FileIO::Bytes(ByteArrayFileIO::new(
-            body.into_bytes(),
-            path.to_string(),
-            0,
-            flags.bits(),
-            StMode::SYSTEM_FILE,
         )));
         return (fd, 0)
     }
